@@ -1,0 +1,23 @@
+# Frontend
+drishyamitra-frontend/node_modules/
+drishyamitra-frontend/build/
+
+# Backend
+drishyamitra-backend/.venv/
+drishyamitra-backend/__pycache__/
+drishyamitra-backend/.env
+drishyamitra-backend/chroma_data/
+
+# Python
+*.pyc
+*.pyo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/
+
+# Logs
+*.log
