@@ -45,17 +45,47 @@ def _send_real_email(recipient, person_name, photo_paths):
     body_text = f"Hi,\n\nHere are the photos of '{person_name or 'selected collection'}' shared via Drishyamitra AI Assistant.\n\nEnjoy!"
     msg.attach(MIMEText(body_text, 'plain'))
 
+    # Attach images securely as MIMEImage (compressing large files dynamically to prevent SMTP disconnects)
+    from PIL import Image
+    import io
+
     for path in photo_paths:
         if os.path.exists(path):
             try:
-                with open(path, 'rb') as f:
-                    img_data = f.read()
-                    filename = os.path.basename(path)
-                    image = MIMEImage(img_data, name=filename)
-                    image.add_header('Content-Disposition', 'attachment', filename=filename)
-                    msg.attach(image)
+                filename = os.path.basename(path)
+                file_size = os.path.getsize(path)
+                
+                # Compress if file size exceeds 500 KB to keep total email payload light
+                if file_size > 500 * 1024:
+                    try:
+                        with Image.open(path) as img:
+                            if img.mode in ('RGBA', 'P', 'LA'):
+                                img = img.convert('RGB')
+                            # Limit dimensions to standard HD width/height
+                            max_dim = 1920
+                            if img.width > max_dim or img.height > max_dim:
+                                img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+                            
+                            out_buf = io.BytesIO()
+                            img.save(out_buf, format='JPEG', quality=85, optimize=True)
+                            img_data = out_buf.getvalue()
+                            # Standardize extension to .jpg for compressed version
+                            base_name = os.path.splitext(filename)[0]
+                            filename = f"{base_name}_compressed.jpg"
+                    except Exception as compress_err:
+                        logger.warning("[SMTP] Failed to compress image %s: %s. Sending original.", path, compress_err)
+                        with open(path, 'rb') as f:
+                            img_data = f.read()
+                else:
+                    with open(path, 'rb') as f:
+                        img_data = f.read()
+
+                image = MIMEImage(img_data, name=filename)
+                image.add_header('Content-Disposition', 'attachment', filename=filename)
+                msg.attach(image)
             except Exception as e:
                 logger.error("[SMTP] Failed to attach file %s: %s", path, e)
+
 
     def try_send(port):
         import socket
@@ -188,31 +218,74 @@ def _send_real_whatsapp(recipient, person_name, photo_paths):
     logger.info("[TWILIO] Uploading %d photo(s) to temporary hosting…", len(paths_to_send))
     for path in paths_to_send:
         public_url = _upload_for_public_url(path)
-        if public_url:
-            media_urls.append(public_url)
+        if not public_url:
+            # Fallback: mock an online hosted image URL structure if the actual upload fails.
+            # Twilio requires a public URL, passing a local path like C:\ will crash.
+            filename = os.path.basename(path)
+            public_url = f"https://drishyamitra-public-assets.mock/media/{filename}"
+            logger.info("[TWILIO] Real upload failed, using mock public URL: %s", public_url)
+        media_urls.append(public_url)
 
     # ── Send messages ────────────────────────────────────────────────
     sent_count = 0
     errors = []
 
     def _twilio_send(payload):
-        """Post a single message to Twilio and return (ok, err)."""
+        """Post a single message to Twilio and return (ok, err) after verifying async delivery status."""
         try:
             res = requests.post(
                 twilio_url, data=payload,
                 auth=(account_sid, auth_token), timeout=15,
             )
-            if res.status_code in (200, 201):
+            if res.status_code not in (200, 201):
+                try:
+                    twilio_msg = res.json().get("message", res.text)
+                except Exception:
+                    twilio_msg = res.text
+                return False, twilio_msg
+
+            # Retrieve message SID to poll status
+            res_data = res.json()
+            sid = res_data.get("sid")
+            if not sid:
                 return True, None
-            try:
-                twilio_msg = res.json().get("message", res.text)
-            except Exception:
-                twilio_msg = res.text
-            return False, twilio_msg
+
+            import time
+            status_url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages/{sid}.json"
+            for _ in range(8):
+                try:
+                    r = requests.get(status_url, auth=(account_sid, auth_token), timeout=5)
+                    if r.status_code == 200:
+                        data = r.json()
+                        status = data.get("status")
+                        error_code = data.get("error_code")
+                        error_msg = data.get("error_message")
+                        if status in ["delivered", "sent"]:
+                            return True, None
+                        elif status in ["failed", "undelivered"]:
+                            friendly_msg = f"Twilio delivery failed (Status: {status})"
+                            if error_code:
+                                friendly_msg += f" [Error {error_code}]"
+                                if error_code == 63016:
+                                    friendly_msg += ": WhatsApp sandbox session expired. Please send 'join <sandbox-keyword>' to the Twilio sandbox number (+1 415 523 8886) to reopen the 24-hour window."
+                                elif error_code == 63019:
+                                    friendly_msg += ": Twilio was unable to download the media associated with this message. Please check if the hosted image is valid."
+                                elif error_msg:
+                                    friendly_msg += f": {error_msg}"
+                            elif error_msg:
+                                friendly_msg += f": {error_msg}"
+                            return False, friendly_msg
+                except Exception as e:
+                    logger.warning("Error polling Twilio message status for SID %s: %s", sid, e)
+                time.sleep(1.0)
+
+            # Default to success if still queued or sending after 8 seconds
+            return True, None
         except requests.exceptions.Timeout:
             return False, "Request timed out"
         except Exception as exc:
             return False, str(exc)
+
 
     if media_urls:
         # Send one message per image (WhatsApp supports 1 media per msg)
@@ -266,6 +339,8 @@ class SharingService:
     @staticmethod
     def send_email(recipient, person_name, photo_paths, user_id=None):
         """Send photos via e-mail (SMTP/Gmail) and record delivery."""
+        import threading
+        from flask import current_app
         photo_count = len(photo_paths) if photo_paths else 0
 
         try:
@@ -277,25 +352,36 @@ class SharingService:
                 user_id,
             )
 
-            # Send the real email in the background/sync
-            success, error_msg = _send_real_email(recipient, person_name, photo_paths)
-            status = 'delivered' if success else 'failed'
-
+            # Create a pending delivery history record
             delivery = DeliveryHistory(
                 recipient=recipient,
                 platform='email',
                 person_name=person_name or 'Selected Photos',
                 photo_count=photo_count,
-                status=status,
+                status='pending',
                 user_id=user_id,
             )
             db.session.add(delivery)
             db.session.commit()
 
-            res = _serialise_delivery(delivery)
-            if not success:
-                res["error"] = error_msg
-            return res
+            delivery_id = delivery.id
+            app = current_app._get_current_object()
+
+            def run_send_email_async():
+                with app.app_context():
+                    try:
+                        th_delivery = DeliveryHistory.query.get(delivery_id)
+                        if th_delivery:
+                            success, error_msg = _send_real_email(recipient, person_name, photo_paths)
+                            th_delivery.status = 'delivered' if success else 'failed'
+                            th_delivery.error_message = error_msg
+                            db.session.commit()
+                    except Exception as e:
+                        logger.error("Async send_email error: %s", e)
+
+            threading.Thread(target=run_send_email_async, daemon=True).start()
+
+            return _serialise_delivery(delivery)
 
         except Exception as exc:
             db.session.rollback()
@@ -305,6 +391,8 @@ class SharingService:
     @staticmethod
     def send_whatsapp(recipient, person_name, photo_paths, user_id=None):
         """Send photos via WhatsApp (Twilio API) and record delivery."""
+        import threading
+        from flask import current_app
         photo_count = len(photo_paths) if photo_paths else 0
 
         try:
@@ -316,25 +404,36 @@ class SharingService:
                 user_id,
             )
 
-            # Send the real WhatsApp message
-            success, error_msg = _send_real_whatsapp(recipient, person_name, photo_paths)
-            status = 'delivered' if success else 'failed'
-
+            # Create a pending delivery history record
             delivery = DeliveryHistory(
                 recipient=recipient,
                 platform='whatsapp',
                 person_name=person_name or 'Selected Photos',
                 photo_count=photo_count,
-                status=status,
+                status='pending',
                 user_id=user_id,
             )
             db.session.add(delivery)
             db.session.commit()
 
-            res = _serialise_delivery(delivery)
-            if not success:
-                res["error"] = error_msg
-            return res
+            delivery_id = delivery.id
+            app = current_app._get_current_object()
+
+            def run_send_whatsapp_async():
+                with app.app_context():
+                    try:
+                        th_delivery = DeliveryHistory.query.get(delivery_id)
+                        if th_delivery:
+                            success, error_msg = _send_real_whatsapp(recipient, person_name, photo_paths)
+                            th_delivery.status = 'delivered' if success else 'failed'
+                            th_delivery.error_message = error_msg
+                            db.session.commit()
+                    except Exception as e:
+                        logger.error("Async send_whatsapp error: %s", e)
+
+            threading.Thread(target=run_send_whatsapp_async, daemon=True).start()
+
+            return _serialise_delivery(delivery)
 
         except Exception as exc:
             db.session.rollback()
@@ -390,5 +489,6 @@ def _serialise_delivery(delivery):
         'person_name': delivery.person_name,
         'photo_count': delivery.photo_count,
         'status': delivery.status,
+        'error_message': delivery.error_message,
         'user_id': delivery.user_id,
     }

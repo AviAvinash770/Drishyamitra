@@ -23,7 +23,7 @@ class FacesRouteTestCase(unittest.TestCase):
     """Test suite for /api/faces/* endpoints."""
 
     def setUp(self):
-        """Create a fresh test app and database for every test."""
+        """Create a fresh test app and database, and register a test user for auth."""
         self.app = create_app({
             "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:",
             "TESTING": True,
@@ -33,6 +33,21 @@ class FacesRouteTestCase(unittest.TestCase):
 
         with self.app.app_context():
             db.create_all()
+
+        # Register a test user for scoping and token headers
+        res = self.client.post(
+            "/api/auth/register",
+            data=json.dumps({
+                "username": "testuser",
+                "email": "test@example.com",
+                "password": "StrongP@ss1"
+            }),
+            content_type="application/json",
+        )
+        data = json.loads(res.data)
+        self.token = data["token"]
+        self.user_id = data["user"]["id"]
+        self.headers = {"Authorization": f"Bearer {self.token}"}
 
     def tearDown(self):
         """Drop all tables after each test."""
@@ -49,7 +64,8 @@ class FacesRouteTestCase(unittest.TestCase):
                 file_path="/uploads/test.jpg",
                 size="100 KB",
                 height=100,
-                emoji="📸"
+                emoji="📸",
+                user_id=self.user_id
             )
             db.session.add(photo)
             db.session.commit()
@@ -72,7 +88,7 @@ class FacesRouteTestCase(unittest.TestCase):
             f3_id = face3.id
 
         # Call the API to list unrecognized faces
-        res = self.client.get("/api/faces/")
+        res = self.client.get("/api/faces/", headers=self.headers)
         self.assertEqual(res.status_code, 200)
         data = json.loads(res.data)
 
@@ -111,7 +127,8 @@ class FacesRouteTestCase(unittest.TestCase):
                 file_path="/uploads/test.jpg",
                 size="100 KB",
                 height=100,
-                emoji="📸"
+                emoji="📸",
+                user_id=self.user_id
             )
             db.session.add(photo)
             db.session.commit()
@@ -134,7 +151,8 @@ class FacesRouteTestCase(unittest.TestCase):
                 "face_ids": [f1_id, f2_id],
                 "name": "Alice"
             }),
-            content_type="application/json"
+            content_type="application/json",
+            headers=self.headers
         )
         self.assertEqual(res.status_code, 200)
         data = json.loads(res.data)
@@ -142,7 +160,7 @@ class FacesRouteTestCase(unittest.TestCase):
 
         # Verify that both faces are now linked to Alice
         with self.app.app_context():
-            person = Person.query.filter_by(name="Alice").first()
+            person = Person.query.filter_by(name="Alice", user_id=self.user_id).first()
             self.assertIsNotNone(person)
             
             updated_face1 = Face.query.get(f1_id)
@@ -158,7 +176,8 @@ class FacesRouteTestCase(unittest.TestCase):
                 file_path="/uploads/test.jpg",
                 size="100 KB",
                 height=100,
-                emoji="📸"
+                emoji="📸",
+                user_id=self.user_id
             )
             db.session.add(photo)
             db.session.commit()
@@ -175,12 +194,13 @@ class FacesRouteTestCase(unittest.TestCase):
                 "face_id": f_id,
                 "name": "Bob"
             }),
-            content_type="application/json"
+            content_type="application/json",
+            headers=self.headers
         )
         self.assertEqual(res.status_code, 200)
         
         with self.app.app_context():
-            person = Person.query.filter_by(name="Bob").first()
+            person = Person.query.filter_by(name="Bob", user_id=self.user_id).first()
             self.assertIsNotNone(person)
             updated_face = Face.query.get(f_id)
             self.assertEqual(updated_face.person_id, person.id)
@@ -201,7 +221,8 @@ class FacesRouteTestCase(unittest.TestCase):
                     file_path=img_path,
                     size="100 KB",
                     height=100,
-                    emoji="📸"
+                    emoji="📸",
+                    user_id=self.user_id
                 )
                 db.session.add(photo)
                 db.session.commit()
@@ -215,7 +236,7 @@ class FacesRouteTestCase(unittest.TestCase):
                 db.session.commit()
                 f_id = face.id
 
-            res = self.client.get(f"/api/faces/crop/{f_id}")
+            res = self.client.get(f"/api/faces/crop/{f_id}", headers=self.headers)
             self.assertEqual(res.status_code, 200)
             self.assertEqual(res.mimetype, "image/png")
             # The body should be some non-empty PNG data
@@ -228,7 +249,7 @@ class FacesRouteTestCase(unittest.TestCase):
         """Test DELETE /api/faces/person/<id> unlinks faces and deletes person"""
         with self.app.app_context():
             # Seed person, photo, and linked face
-            person = Person(name="David", initials="D", color="#ffffff", bg="#000000")
+            person = Person(name="David", initials="D", color="#ffffff", bg="#000000", user_id=self.user_id)
             db.session.add(person)
             db.session.flush()
             
@@ -237,7 +258,8 @@ class FacesRouteTestCase(unittest.TestCase):
                 file_path="/uploads/test.jpg",
                 size="100 KB",
                 height=100,
-                emoji="📸"
+                emoji="📸",
+                user_id=self.user_id
             )
             db.session.add(photo)
             db.session.flush()
@@ -250,7 +272,7 @@ class FacesRouteTestCase(unittest.TestCase):
             f_id = face.id
 
         # Delete the person
-        res = self.client.delete(f"/api/faces/person/{p_id}")
+        res = self.client.delete(f"/api/faces/person/{p_id}", headers=self.headers)
         self.assertEqual(res.status_code, 200)
 
         # Verify person is deleted and face is unlinked (person_id is None)
@@ -264,7 +286,7 @@ class FacesRouteTestCase(unittest.TestCase):
 
     def test_delete_person_not_found(self):
         """Test DELETE /api/faces/person/<id> with non-existent ID returns 404"""
-        res = self.client.delete("/api/faces/person/9999")
+        res = self.client.delete("/api/faces/person/9999", headers=self.headers)
         self.assertEqual(res.status_code, 404)
 
 

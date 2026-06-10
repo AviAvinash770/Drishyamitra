@@ -1,36 +1,132 @@
 import React, { useState, useEffect, useRef } from "react";
 import { api } from "../../api";
 import { GP } from "../../styles/theme";
-import Avatar from "../common/Avatar";
 import PhotoDetailModal from "../gallery/PhotoDetailModal";
 import PersonPhotosModal from "../gallery/PersonPhotosModal";
 
-export default function ChatPage({ showNotif, setPage, setSearch, setShareParams }) {
+const extractChatAction = (text) => {
+  if (!text) return null;
+  
+  // 1. Try markdown json block first
+  const mdMatch = text.match(/```json\s*([\s\S]*?)\s*```/);
+  if (mdMatch) {
+    try {
+      const parsed = JSON.parse(mdMatch[1]);
+      if (parsed && (parsed.action === "EXECUTE_WHATSAPP_SHARE" || parsed.action === "EXECUTE_EMAIL_SHARE" || parsed.action === "FILTER_GALLERY_BY_LABEL")) {
+        return parsed;
+      }
+    } catch (e) {}
+  }
+  
+  // 2. Try raw JSON by finding '{' containing '"action"' and matching brackets
+  const startIndex = text.search(/\{\s*("action"|'action')/);
+  if (startIndex !== -1) {
+    let braceCount = 0;
+    let endIndex = -1;
+    for (let i = startIndex; i < text.length; i++) {
+      if (text[i] === "{") braceCount++;
+      else if (text[i] === "}") {
+        braceCount--;
+        if (braceCount === 0) {
+          endIndex = i;
+          break;
+        }
+      }
+    }
+    if (endIndex !== -1) {
+      const rawJson = text.substring(startIndex, endIndex + 1);
+      try {
+        const parsed = JSON.parse(rawJson);
+        if (parsed && (parsed.action === "EXECUTE_WHATSAPP_SHARE" || parsed.action === "EXECUTE_EMAIL_SHARE" || parsed.action === "FILTER_GALLERY_BY_LABEL")) {
+          return parsed;
+        }
+      } catch (e) {}
+    }
+  }
+  return null;
+};
+
+const generateThreeWordTitle = (messages) => {
+  if (!messages || messages.length === 0) return "General AI Search";
+  
+  const allText = messages.map(m => m.text).join(" ").toLowerCase();
+  
+  // Check common keywords
+  const isWhatsApp = allText.includes("whatsapp") || allText.includes("share");
+  const isEmail = allText.includes("email") || allText.includes("send");
+  
+  const names = ["avinash", "sathish", "satish", "priya", "grandma", "family"];
+  let foundName = null;
+  for (const n of names) {
+    if (allText.includes(n)) {
+      foundName = n.charAt(0).toUpperCase() + n.slice(1);
+      break;
+    }
+  }
+  
+  const isBeach = allText.includes("beach") || allText.includes("coast");
+  const isWedding = allText.includes("wedding");
+  const isGreenery = allText.includes("greenery") || allText.includes("nature") || allText.includes("outdoor");
+
+  if (isWhatsApp) {
+    return `Shared ${foundName || "Recent"} Photos`;
+  }
+  if (isEmail) {
+    return `Emailed ${foundName || "Selected"} Photos`;
+  }
+  if (isBeach) return "Beach & Coast Search";
+  if (isWedding) return "Wedding Photos Search";
+  if (isGreenery) return "Nature Scenes Search";
+  if (foundName) return `Found ${foundName} Photos`;
+  
+  return "General AI Search";
+};
+
+const EMPTY_MESSAGES = [];
+
+export default function ChatPage({ showNotif, setPage, setSearch, setShareParams, chatPreFill, setChatPreFill, setGalleryFilter, setAddingToAlbum, globalActivePhotoIds }) {
   const [conversations, setConversations] = useState(() => {
     const saved = localStorage.getItem("drishyamitra_conversations");
-    return saved ? JSON.parse(saved) : [
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (parsed && parsed.length > 0) return parsed;
+      } catch (e) {}
+    }
+    return [
       {
-        id: "default",
-        title: "Welcome Chat",
+        id: "temp",
+        title: "New Chat",
         messages: [
           { role: "bot", text: `Hi! I'm your Drishyamitra AI assistant 👋\n\nI can help you find photos, organize your collection, and share memories. Try asking:\n• "Show me photos of Priya from last month"\n• "Send Grandma's photos to email"\n• "How many wedding photos do I have?"` }
         ]
       }
     ];
   });
-  const [activeId, setActiveId] = useState(() => conversations[0]?.id || "default");
+  const [activeId, setActiveId] = useState(() => conversations[0]?.id || "temp");
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [selectedPhoto, setSelectedPhoto] = useState(null);
   const [viewingPerson, setViewingPerson] = useState(null);
+  const [activeSharePhotoIds, setActiveSharePhotoIds] = useState([]);
   const bottomRef = useRef();
 
   const activeChat = conversations.find(c => c.id === activeId) || conversations[0];
-  const messages = activeChat ? activeChat.messages : [];
+  const messages = activeChat ? activeChat.messages : EMPTY_MESSAGES;
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  useEffect(() => {
+    if (chatPreFill) {
+      setInput(chatPreFill.message);
+      if (chatPreFill.photoIds) {
+        setActiveSharePhotoIds(chatPreFill.photoIds);
+      }
+      if (setChatPreFill) setChatPreFill(null);
+    }
+  }, [chatPreFill, setChatPreFill]);
 
   const saveConversations = (updated) => {
     setConversations(updated);
@@ -64,49 +160,231 @@ export default function ChatPage({ showNotif, setPage, setSearch, setShareParams
     }
   };
 
+  const handleManualDelete = async () => {
+    if (messages.length > 1) {
+      const title = generateThreeWordTitle(messages);
+      const updatedConversations = conversations.map(c => {
+        if (c.id === activeId) {
+          return { ...c, title: title };
+        }
+        return c;
+      });
+      
+      const newId = Date.now().toString();
+      const newChat = {
+        id: newId,
+        title: `Chat ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
+        messages: [
+          { role: "bot", text: "Hi! I'm your Drishyamitra AI assistant. How can I help you today?" }
+        ]
+      };
+      
+      saveConversations([newChat, ...updatedConversations]);
+      setActiveId(newId);
+      showNotif("Chat session archived. Fresh context loaded.", "success");
+    } else {
+      showNotif("Nothing to archive.", "info");
+    }
+    
+    try {
+      await api.chat.clear();
+    } catch (err) {
+      console.error("Failed to clear backend chat history:", err);
+    }
+  };
+
   async function send() {
     if (!input.trim() || loading) return;
     const userMsg = input.trim();
     setInput("");
 
+    const userMsgLower = userMsg.toLowerCase().trim();
+    const isCompletion = 
+      userMsgLower === "thank you" || 
+      userMsgLower === "done" || 
+      userMsgLower === "exit" || 
+      userMsgLower === "thanks" ||
+      userMsgLower.includes("thank you") ||
+      userMsgLower.includes("thanks");
+
+    if (isCompletion) {
+      if (messages.length > 1) {
+        const title = generateThreeWordTitle(messages);
+        const updatedConversations = conversations.map(c => {
+          if (c.id === activeId) {
+            return { ...c, title: title };
+          }
+          return c;
+        });
+        
+        const newId = Date.now().toString();
+        const newChat = {
+          id: newId,
+          title: `Chat ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
+          messages: [
+            { role: "bot", text: "Hi! I'm your Drishyamitra AI assistant. How can I help you today?" }
+          ]
+        };
+        
+        saveConversations([newChat, ...updatedConversations]);
+        setActiveId(newId);
+        showNotif("Conversation completed and archived.", "success");
+      } else {
+        showNotif("Conversation completed.", "success");
+      }
+      setInput("");
+      try {
+        await api.chat.clear();
+      } catch (err) {
+        console.error("Failed to clear backend chat history:", err);
+      }
+      return;
+    }
+
     // Append user message
     const updatedMessages = [...messages, { role: "user", text: userMsg }];
-    const nextConversations = conversations.map(c => {
-      if (c.id === activeId) {
-        // Auto rename title if it's default title and this is first user message
-        let newTitle = c.title;
-        if (c.messages.length === 1 && c.title.startsWith("Chat ")) {
-          newTitle = userMsg.length > 18 ? userMsg.slice(0, 15) + "..." : userMsg;
+    let realActiveId = activeId;
+    let nextConversations = conversations;
+    
+    if (activeId === "temp") {
+      realActiveId = Date.now().toString();
+      const newTitle = userMsg.length > 18 ? userMsg.slice(0, 15) + "..." : userMsg;
+      nextConversations = conversations.map(c => {
+        if (c.id === "temp") {
+          return { ...c, id: realActiveId, title: newTitle, messages: updatedMessages };
         }
-        return { ...c, title: newTitle, messages: updatedMessages };
-      }
-      return c;
-    });
+        return c;
+      });
+      setActiveId(realActiveId);
+    } else {
+      nextConversations = conversations.map(c => {
+        if (c.id === activeId) {
+          let newTitle = c.title;
+          if (c.messages.length === 1 && (c.title.startsWith("Chat ") || c.title === "New Chat")) {
+            newTitle = userMsg.length > 18 ? userMsg.slice(0, 15) + "..." : userMsg;
+          }
+          return { ...c, title: newTitle, messages: updatedMessages };
+        }
+        return c;
+      });
+    }
+    
     saveConversations(nextConversations);
     setLoading(true);
 
     try {
+      // Find active photo IDs from the last bot message displaying photos or the pre-filled share selection
+      let activePhotoIds = [...activeSharePhotoIds];
+      if (activePhotoIds.length === 0) {
+        for (let i = updatedMessages.length - 1; i >= 0; i--) {
+          if (updatedMessages[i].role === "bot" && updatedMessages[i].photos && updatedMessages[i].photos.length > 0) {
+            updatedMessages[i].photos.forEach(p => activePhotoIds.push(p.id));
+            break;
+          }
+        }
+      }
+      // Fallback to global active photo context if chat history/selection is empty
+      if (activePhotoIds.length === 0 && globalActivePhotoIds && globalActivePhotoIds.length > 0) {
+        activePhotoIds = [...globalActivePhotoIds];
+      }
+      setActiveSharePhotoIds([]);
+
       const history = updatedMessages.slice(-8).map(m => ({ role: m.role === "user" ? "user" : "bot", content: m.text }));
-      const res = await api.chat.send(userMsg, history);
+      const res = await api.chat.send(userMsg, history, activePhotoIds);
+      
+      // Check for EXECUTE_WHATSAPP_SHARE or EXECUTE_EMAIL_SHARE action
+      const action = extractChatAction(res.response);
+      
+      // Clean bot response text to hide raw JSON and code blocks from the chat bubble
+      let cleanText = res.response;
+      const codeBlockIndex = cleanText.indexOf("```json");
+      if (codeBlockIndex !== -1) {
+        cleanText = cleanText.substring(0, codeBlockIndex).trim();
+      } else {
+        const rawJsonIndex = cleanText.search(/\{\s*("action"|'action')/);
+        if (rawJsonIndex !== -1) {
+          cleanText = cleanText.substring(0, rawJsonIndex).trim();
+        }
+      }
+      // Strip any XML-style function/tool tags the LLM might emit
+      cleanText = cleanText
+        .replace(/<function=[^>]*>[\s\S]*?<\/function>/gi, "")
+        .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "")
+        .replace(/<function_calls>[\s\S]*?<\/function_calls>/gi, "")
+        .replace(/<tool_response>[\s\S]*?<\/tool_response>/gi, "")
+        .replace(/<thought>[\s\S]*?<\/thought>/gi, "")
+        .replace(/<[^>]*tool[^>]*>[\s\S]*?<\/[^>]*tool[^>]*>/gi, "")
+        .replace(/```(json|xml|tool_call)[^`]*```/gi, "")
+        .replace(/<[^>]+>/g, "")
+        .trim();
       
       const finalMessages = [...updatedMessages, { 
         role: "bot", 
-        text: res.response,
+        text: cleanText,
         photos: res.photos || [],
         persons: res.persons || [],
         album: res.album || null
       }];
       const finalConversations = nextConversations.map(c => {
-        if (c.id === activeId) {
+        if (c.id === realActiveId) {
           return { ...c, messages: finalMessages };
         }
         return c;
       });
       saveConversations(finalConversations);
-    } catch {
+
+      // Perform redirection to main viewport workspace for search/retrieval actions
+      if (res.photos && res.photos.length > 0) {
+        setSearch(userMsg);
+        if (setAddingToAlbum) setAddingToAlbum(null);
+        setPage("gallery");
+        showNotif(`Found ${res.photos.length} photo(s).`, "success");
+      } else if (res.album) {
+        if (setGalleryFilter) setGalleryFilter(res.album.name);
+        if (setAddingToAlbum) setAddingToAlbum(null);
+        setPage("gallery");
+        showNotif(`Opened album "${res.album.name}".`, "success");
+      } else if (res.persons && res.persons.length > 0) {
+        setSearch(res.persons[0].name);
+        if (setAddingToAlbum) setAddingToAlbum(null);
+        setPage("gallery");
+        showNotif(`Showing photos of ${res.persons[0].name}.`, "success");
+      }
+
+      if (action) {
+        if (action.action === "FILTER_GALLERY_BY_LABEL" && action.target_label) {
+          setSearch(action.target_label);
+          if (setGalleryFilter) setGalleryFilter("All Photos");
+          if (setAddingToAlbum) setAddingToAlbum(null);
+          setPage("gallery");
+          showNotif(action.message || `Showing photos of ${action.target_label}.`, "success");
+        } else if (action.payload && action.payload.images && action.payload.images.length > 0) {
+          if (action.action === "EXECUTE_WHATSAPP_SHARE") {
+            const contact = action.payload.default_contact || "+919876543210";
+            showNotif(`Initializing WhatsApp sharing for ${action.payload.images.length} photo(s) to ${contact}...`, "info");
+            api.photos.shareWhatsAppPywhatkit(contact, action.payload.images).then(() => {
+              showNotif("WhatsApp sharing process launched on desktop successfully.", "success");
+            }).catch(err => {
+              console.error("WhatsApp share API error:", err);
+              showNotif("Failed to launch WhatsApp sharing process.", "error");
+            });
+          } else if (action.action === "EXECUTE_EMAIL_SHARE") {
+            const email = action.payload.recipient;
+            showNotif(`Sending ${action.payload.images.length} photo(s) to ${email} via Email...`, "info");
+            api.photos.shareEmail(email, action.payload.images).then(() => {
+              showNotif("Photos sent successfully via SMTP Email.", "success");
+            }).catch(err => {
+              console.error("Email share API error:", err);
+              showNotif("Failed to send photos via Email.", "error");
+            });
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Chat page send error:", err);
       const finalMessages = [...updatedMessages, { role: "bot", text: "Sorry, I couldn't process that. Please check backend connection." }];
       const finalConversations = nextConversations.map(c => {
-        if (c.id === activeId) {
+        if (c.id === realActiveId) {
           return { ...c, messages: finalMessages };
         }
         return c;
@@ -117,7 +395,12 @@ export default function ChatPage({ showNotif, setPage, setSearch, setShareParams
     }
   }
 
-  const suggestions = ["Show photos of Priya", "Send Grandma's photos", "How many wedding photos?", "Find Festival 2024 photos"];
+  const suggestions = [
+    "How does automatic clustering work?",
+    "What happens when I upload a group photo?",
+    "How do I use gallery navigation?",
+    "How do I label unrecognized faces?"
+  ];
 
   return (
     <div style={{ display: "flex", gap: 24, height: "calc(100vh - 140px)" }}>
@@ -154,43 +437,49 @@ export default function ChatPage({ showNotif, setPage, setSearch, setShareParams
         </button>
         <div style={{ fontSize: 11, color: GP.textTertiary, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 8, paddingLeft: 4 }}>History</div>
         <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
-          {conversations.map(c => (
-            <div
-              key={c.id}
-              onClick={() => setActiveId(c.id)}
-              style={{
-                padding: "8px 10px",
-                borderRadius: 8,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                cursor: "pointer",
-                background: activeId === c.id ? GP.surface : "transparent",
-                color: activeId === c.id ? GP.blue : GP.textSecondary,
-                fontSize: 12,
-                fontWeight: activeId === c.id ? 600 : 400,
-                transition: "all 0.15s"
-              }}
-            >
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, textAlign: "left" }}>💬 {c.title}</span>
-              {conversations.length > 1 && (
-                <button
-                  onClick={(e) => deleteChat(e, c.id)}
-                  style={{
-                    background: "none",
-                    border: "none",
-                    cursor: "pointer",
-                    color: GP.textTertiary,
-                    fontSize: 12,
-                    padding: "0 4px"
-                  }}
-                  title="Delete conversation"
-                >
-                  ✕
-                </button>
-              )}
+          {conversations.filter(c => c.id !== "temp").length === 0 ? (
+            <div style={{ color: GP.textTertiary, fontSize: 12, padding: "16px 10px", fontStyle: "italic", textAlign: "center" }}>
+              No recent activity
             </div>
-          ))}
+          ) : (
+            conversations.filter(c => c.id !== "temp").map(c => (
+              <div
+                key={c.id}
+                onClick={() => setActiveId(c.id)}
+                style={{
+                  padding: "8px 10px",
+                  borderRadius: 8,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  cursor: "pointer",
+                  background: activeId === c.id ? GP.surface : "transparent",
+                  color: activeId === c.id ? GP.blue : GP.textSecondary,
+                  fontSize: 12,
+                  fontWeight: activeId === c.id ? 600 : 400,
+                  transition: "all 0.15s"
+                }}
+              >
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, textAlign: "left" }}>💬 {c.title}</span>
+                {conversations.filter(c => c.id !== "temp").length > 1 && (
+                  <button
+                    onClick={(e) => deleteChat(e, c.id)}
+                    style={{
+                      background: "none",
+                      border: "none",
+                      cursor: "pointer",
+                      color: GP.textTertiary,
+                      fontSize: 12,
+                      padding: "0 4px"
+                    }}
+                    title="Delete conversation"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+            ))
+          )}
         </div>
       </div>
 
@@ -199,14 +488,48 @@ export default function ChatPage({ showNotif, setPage, setSearch, setShareParams
         {/* Header */}
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
           <div style={{ width: 40, height: 40, borderRadius: 12, background: GP.blueLight, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20 }}>🤖</div>
-          <div>
+          <div style={{ flex: 1 }}>
             <h2 style={{ fontSize: 16, fontWeight: 600, color: GP.textPrimary, margin: 0 }}>AI Assistant</h2>
             <div style={{ fontSize: 11, color: GP.green, fontWeight: 500, marginTop: 2 }}>● Online · Powered by Groq Llama 3.3</div>
           </div>
+          <button
+            onClick={handleManualDelete}
+            style={{
+              background: GP.coralLight,
+              color: GP.coral,
+              border: "none",
+              borderRadius: 20,
+              padding: "8px 16px",
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              transition: "all 0.2s"
+            }}
+            onMouseEnter={e => {
+              e.currentTarget.style.background = GP.coral;
+              e.currentTarget.style.color = "#fff";
+            }}
+            onMouseLeave={e => {
+              e.currentTarget.style.background = GP.coralLight;
+              e.currentTarget.style.color = GP.coral;
+            }}
+            title="Delete current conversation logs and reset context"
+          >
+            🗑️ Delete History
+          </button>
         </div>
 
         {/* Messages */}
         <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 16, paddingBottom: 12 }}>
+          {messages.length === 0 && (
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", opacity: 0.5, color: GP.textSecondary, padding: 40, textAlign: "center" }}>
+              <span style={{ fontSize: 48, marginBottom: 12 }}>💬</span>
+              <p style={{ fontSize: 14, fontWeight: 500 }}>No messages yet. Ask a question to start the conversation!</p>
+            </div>
+          )}
           {messages.map((m, i) => (
             <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: m.role === "user" ? "flex-end" : "flex-start", animation: "fadeUp 0.3s ease" }}>
               <div style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start", gap: 8, alignItems: "flex-end", width: "100%" }}>
@@ -225,189 +548,6 @@ export default function ChatPage({ showNotif, setPage, setSearch, setShareParams
                   boxShadow: GP.shadow1,
                 }}>{m.text}</div>
               </div>
-
-              {m.role === "bot" && (m.photos || m.persons || m.album) && (
-                <div style={{ marginLeft: 40, marginTop: 8, width: "calc(100% - 40px)", maxWidth: "80%" }}>
-                  {/* Photos Grid */}
-                  {m.photos && m.photos.length > 0 && (
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))", gap: 10, width: "100%", marginTop: 4 }}>
-                      {m.photos.map(p => (
-                        <div 
-                          key={p.id} 
-                          onClick={() => setSelectedPhoto(p)}
-                          style={{
-                            borderRadius: 12,
-                            overflow: "hidden",
-                            cursor: "pointer",
-                            border: `1px solid ${GP.borderLight}`,
-                            boxShadow: GP.shadow1,
-                            background: GP.white,
-                            transition: "transform 0.2s, box-shadow 0.2s",
-                            position: "relative"
-                          }}
-                          onMouseEnter={e => {
-                            e.currentTarget.style.transform = "translateY(-2px)";
-                            e.currentTarget.style.boxShadow = GP.shadow2;
-                          }}
-                          onMouseLeave={e => {
-                            e.currentTarget.style.transform = "translateY(0)";
-                            e.currentTarget.style.boxShadow = GP.shadow1;
-                          }}
-                        >
-                          <div style={{ width: "100%", height: 100, background: p.url ? "none" : `linear-gradient(135deg, ${p.palette?.[0] || "#e8d5b7"}, ${p.palette?.[1] || "#d4a574"})`, position: "relative" }}>
-                            {p.url ? (
-                              <img src={p.url} alt={p.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                            ) : (
-                              <span style={{ fontSize: 24, display: "flex", alignItems: "center", justifyContent: "center", height: "100%" }}>{p.emoji || "📸"}</span>
-                            )}
-                          </div>
-                          <div style={{ padding: "6px 8px" }}>
-                            <div style={{ fontSize: 11, fontWeight: 600, color: GP.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                              {p.name}
-                            </div>
-                            {p.persons && p.persons.length > 0 && (
-                              <div style={{ fontSize: 9, color: GP.textTertiary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: 2 }}>
-                                👤 {p.persons.join(", ")}
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Persons Grid */}
-                  {m.persons && m.persons.length > 0 && (
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 12, width: "100%", marginTop: 4 }}>
-                      {m.persons.map(p => (
-                        <div 
-                          key={p.id}
-                          style={{
-                            background: GP.white,
-                            borderRadius: 16,
-                            padding: "16px 12px",
-                            display: "flex",
-                            flexDirection: "column",
-                            alignItems: "center",
-                            gap: 10,
-                            boxShadow: GP.shadow1,
-                            border: `1px solid ${GP.borderLight}`,
-                            transition: "all 0.2s"
-                          }}
-                        >
-                          <Avatar person={p} size={48} />
-                          <div style={{ textAlign: "center", minWidth: 0, width: "100%" }}>
-                            <div style={{ fontWeight: 700, fontSize: 12, color: GP.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
-                            <div style={{ color: GP.textTertiary, fontSize: 11, marginTop: 2 }}>{p.photoCount || p.photo_count || 0} photos</div>
-                          </div>
-                          {p.tags && p.tags.length > 0 && (
-                            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", justifyContent: "center" }}>
-                              {p.tags.slice(0, 2).map(t => (
-                                <span key={t} style={{ padding: "2px 8px", background: p.bg || GP.blueLight, color: p.color || GP.blue, borderRadius: 20, fontSize: 9, fontWeight: 500 }}>{t}</span>
-                              ))}
-                            </div>
-                          )}
-                          <div style={{ display: "flex", gap: 8, width: "100%" }}>
-                            <button
-                              onClick={() => setViewingPerson(p)}
-                              style={{ flex: 1, padding: "5px 0", background: GP.surface, border: `1px solid ${GP.border}`, borderRadius: 6, fontSize: 10, fontWeight: 600, cursor: "pointer", color: GP.textPrimary }}
-                            >View</button>
-                            <button
-                              onClick={() => {
-                                if (setShareParams) setShareParams({ targetType: "person", selectedPerson: p.name });
-                                if (setPage) setPage("delivery");
-                              }}
-                              style={{ flex: 1, padding: "5px 0", background: GP.blueLight, border: "none", borderRadius: 6, fontSize: 10, fontWeight: 600, cursor: "pointer", color: GP.blue }}
-                            >Share</button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Album Card */}
-                  {m.album && (
-                    <div style={{
-                      background: GP.white,
-                      borderRadius: 16,
-                      padding: "16px 20px",
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 16,
-                      boxShadow: GP.shadow1,
-                      border: `1px solid ${GP.borderLight}`,
-                      marginTop: 4,
-                      maxWidth: 380
-                    }}>
-                      <div style={{
-                        width: 44,
-                        height: 44,
-                        borderRadius: 12,
-                        background: m.album.bg || GP.blueLight,
-                        color: m.album.color || GP.blue,
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        fontSize: 22,
-                        flexShrink: 0
-                      }}>
-                        {m.album.icon || "📁"}
-                      </div>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 13, fontWeight: 600, color: GP.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {m.album.name}
-                        </div>
-                        <div style={{ fontSize: 11, color: GP.textSecondary, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {m.album.description || "Photo Album"}
-                        </div>
-                        <div style={{ fontSize: 10, color: GP.textTertiary, marginTop: 4 }}>
-                          {m.album.count || 0} photo{m.album.count !== 1 ? "s" : ""}
-                        </div>
-                      </div>
-                      <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
-                        <button
-                          onClick={() => {
-                            if (setSearch) setSearch(m.album.name);
-                            if (setPage) setPage("gallery");
-                          }}
-                          style={{
-                            padding: "6px 12px",
-                            background: GP.surface,
-                            border: `1px solid ${GP.border}`,
-                            borderRadius: 8,
-                            fontSize: 10,
-                            fontWeight: 600,
-                            cursor: "pointer",
-                            color: GP.textPrimary,
-                            whiteSpace: "nowrap"
-                          }}
-                        >
-                          View Album
-                        </button>
-                        <button
-                          onClick={() => {
-                            if (setShareParams) setShareParams({ targetType: "album", selectedAlbum: m.album.name });
-                            if (setPage) setPage("delivery");
-                          }}
-                          style={{
-                            padding: "6px 12px",
-                            background: GP.blueLight,
-                            border: "none",
-                            borderRadius: 8,
-                            fontSize: 10,
-                            fontWeight: 600,
-                            cursor: "pointer",
-                            color: GP.blue,
-                            whiteSpace: "nowrap"
-                          }}
-                        >
-                          Share
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
             </div>
           ))}
           {loading && (

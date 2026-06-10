@@ -32,6 +32,14 @@ class EmbeddingService:
                    Returns 0.0 if either embedding is empty or malformed.
         """
         try:
+            import json
+            
+            # If the database returns the JSON column as a string, parse it first
+            if isinstance(embedding_a, str):
+                embedding_a = json.loads(embedding_a)
+            if isinstance(embedding_b, str):
+                embedding_b = json.loads(embedding_b)
+
             vec_a = np.array(embedding_a, dtype=np.float64).reshape(1, -1)
             vec_b = np.array(embedding_b, dtype=np.float64).reshape(1, -1)
 

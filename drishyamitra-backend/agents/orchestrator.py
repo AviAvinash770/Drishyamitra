@@ -23,9 +23,10 @@ _CLASSIFICATION_PROMPT = (
     "  • search  – looking for photos, finding pictures, browsing images\n"
     "  • memory  – asking about a person, relationship, or who someone is\n"
     "  • album   – creating, managing, or organising albums\n"
-    "  • sharing – sending, sharing, emailing, or WhatsApp-ing photos\n"
-    "  • general – greetings, small-talk, help, or anything else\n\n"
+    "  • general – greetings, small-talk, help, how-to instructions, sharing/sending photos, app features, or anything else\n\n"
     "User request: {query}\n\n"
+    "CRITICAL RULE: If the request is sharing or sending photos, or asking HOW to do something (e.g. 'how can I share photos', 'how does clustering work', 'how to upload'), "
+    "classify it as 'general' because it is a guide or conversation request.\n\n"
     "Respond with ONLY the category name in lowercase, nothing else."
 )
 
@@ -51,17 +52,27 @@ class OrchestratorAgent:
         * ``search``  – photo finding / browsing
         * ``memory``  – person / relationship queries
         * ``album``   – album creation / management
-        * ``sharing`` – send / share requests
+        * ``sharing`` – photo delivery agent
         * ``end``     – general conversation (maps from ``general``)
 
         Returns
         -------
         dict
-            Updated state with ``next_step`` and an entry appended to
-            ``action_logs``.
         """
         query: str = state.get("user_query", "")
         action_logs: list = list(state.get("action_logs", []))
+        messages: list = state.get("messages", [])
+
+        # Check conversation history for active sharing state
+        if messages:
+            last_msg = messages[-1]
+            if last_msg.get("role") in ["bot", "assistant"]:
+                last_text = last_msg.get("content", "").lower()
+                if any(phrase in last_text for phrase in ["1. whatsapp or 2. email", "phone number", "email address"]):
+                    action_logs.append(f"[orchestrator] Detected active sharing state from history. Forcing 'sharing' route.")
+                    state["next_step"] = "sharing"
+                    state["action_logs"] = action_logs
+                    return state
 
         try:
             api_key = current_app.config["GROQ_API_KEY"]
@@ -115,14 +126,19 @@ class OrchestratorAgent:
         Parameters
         ----------
         query : str
-            The user's natural-language request.
+          The user's natural-language request.
 
         Returns
         -------
         str
-            One of ``search``, ``memory``, ``album``, ``sharing``, or ``end``.
+          One of ``search``, ``memory``, ``album``, ``sharing`` or ``end``.
         """
         q = query.lower()
+
+        # If it is a guide/how-to question, route to general/end
+        how_to_phrases = ["how do i", "how can i", "how to", "how does", "explain how", "what is", "what does", "how can we", "how do we"]
+        if any(phrase in q for phrase in how_to_phrases):
+            return "end"
 
         sharing_kw = {"send", "share", "email", "whatsapp", "deliver", "forward"}
         album_kw = {"album", "group", "organise", "organize", "collection", "folder"}

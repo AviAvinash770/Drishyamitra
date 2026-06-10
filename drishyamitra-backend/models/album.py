@@ -17,13 +17,15 @@ class Album(db.Model):
     """A named collection (folder/album) of photos."""
 
     __tablename__ = 'albums'
+    __table_args__ = (db.UniqueConstraint('name', 'user_id', name='_user_album_uc'),)
 
     id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), unique=True, nullable=False)
+    name = db.Column(db.String(100), nullable=False)
     description = db.Column(db.String(255), nullable=True)
     icon = db.Column(db.String(10), default='📁')
     color = db.Column(db.String(20), default='#1a73e8')
     bg = db.Column(db.String(20), default='#e8f0fe')
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     photos = db.relationship('Photo', secondary=photo_album, back_populates='albums')

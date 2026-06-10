@@ -59,12 +59,13 @@ class MemoryAgent:
             Updated state.
         """
         query: str = state.get("user_query", "")
+        user_id: int = state.get("user_id")
         action_logs: list = list(state.get("action_logs", []))
         matched_persons: List[Dict[str, Any]] = []
         person_ids: List[int] = []
 
         try:
-            matched_persons = MemoryAgent._resolve_persons(query)
+            matched_persons = MemoryAgent._resolve_persons(query, user_id)
 
             if matched_persons:
                 person_ids = [p["id"] for p in matched_persons]
@@ -102,7 +103,7 @@ class MemoryAgent:
     # ── Private helpers ──────────────────────────────────────────────────────
 
     @staticmethod
-    def _resolve_persons(query: str) -> List[Dict[str, Any]]:
+    def _resolve_persons(query: str, user_id: int) -> List[Dict[str, Any]]:
         """Return metadata dicts for all persons whose name fuzzy-matches the query.
 
         Each returned dict contains:
@@ -111,7 +112,7 @@ class MemoryAgent:
         results: List[Dict[str, Any]] = []
         seen_ids: set = set()
 
-        all_persons = Person.query.all()
+        all_persons = Person.query.filter_by(user_id=user_id).all()
 
         for person in all_persons:
             if not person.name:
@@ -150,12 +151,12 @@ class MemoryAgent:
 
         # If direct substring matching found nothing, try LIKE on each word
         if not results:
-            results = MemoryAgent._fuzzy_word_search(query, seen_ids)
+            results = MemoryAgent._fuzzy_word_search(query, seen_ids, user_id)
 
         return results
 
     @staticmethod
-    def _fuzzy_word_search(query: str, exclude_ids: set) -> List[Dict[str, Any]]:
+    def _fuzzy_word_search(query: str, exclude_ids: set, user_id: int) -> List[Dict[str, Any]]:
         """Fall-back: split query into words and run ``LIKE`` for each."""
         results: List[Dict[str, Any]] = []
         words = [w for w in query.split() if len(w) >= 3]
@@ -163,6 +164,7 @@ class MemoryAgent:
         for word in words:
             pattern = f"%{word}%"
             matches = Person.query.filter(
+                Person.user_id == user_id,
                 Person.name.ilike(pattern)
             ).all()
 

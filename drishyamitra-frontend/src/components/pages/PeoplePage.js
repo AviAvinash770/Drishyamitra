@@ -5,7 +5,7 @@ import Avatar from "../common/Avatar";
 import PersonPhotosModal from "../gallery/PersonPhotosModal";
 import PhotoDetailModal from "../gallery/PhotoDetailModal";
 
-function ClusterAlbumModal({ cluster, onClose, onSaveLabel, saving }) {
+function ClusterAlbumModal({ cluster, onClose, onSaveLabel, saving, persons = [], onRefresh }) {
   const [name, setName] = useState("");
   const [selectedPhoto, setSelectedPhoto] = useState(null);
   
@@ -44,6 +44,7 @@ function ClusterAlbumModal({ cluster, onClose, onSaveLabel, saving }) {
           display: "flex", gap: 10, marginBottom: 20, background: GP.surface, padding: 16, borderRadius: 16
         }}>
           <input
+            list="cluster-person-list"
             style={{
               flex: 1, padding: "11px 16px", border: `1px solid ${GP.border}`,
               borderRadius: 24, fontSize: 13, background: GP.white, color: GP.textPrimary
@@ -54,6 +55,9 @@ function ClusterAlbumModal({ cluster, onClose, onSaveLabel, saving }) {
             disabled={saving}
             autoFocus
           />
+          <datalist id="cluster-person-list">
+            {persons.map(p => <option key={p.id} value={p.name} />)}
+          </datalist>
           <button
             type="submit"
             disabled={saving || !name.trim()}
@@ -91,7 +95,7 @@ function ClusterAlbumModal({ cluster, onClose, onSaveLabel, saving }) {
                 }}
               >
                 <img
-                  src={f.photo_url || `http://localhost:5000/api/faces/crop/${f.id}`}
+                  src={`http://localhost:5000/api/faces/crop/${f.id}`}
                   alt="Match preview"
                   style={{
                     position: "absolute", top: 0, left: 0, width: "100%", height: "100%",
@@ -110,15 +114,21 @@ function ClusterAlbumModal({ cluster, onClose, onSaveLabel, saving }) {
         <PhotoDetailModal
           photo={selectedPhoto}
           onClose={() => setSelectedPhoto(null)}
+          onReLabel={async () => {
+            if (onRefresh) await onRefresh();
+            setSelectedPhoto(null);
+            onClose();
+          }}
         />
       )}
     </div>
   );
 }
 
-export default function PeoplePage({ showNotif, setPage, setShareParams }) {
+export default function PeoplePage({ showNotif, setPage, setShareParams, refreshTrigger }) {
   const [persons, setPersons] = useState([]);
   const [unrecognized, setUnrecognized] = useState([]);
+  const [suggestions, setSuggestions] = useState([]);
   const [viewingCluster, setViewingCluster] = useState(null);
   const [viewingPerson, setViewingPerson] = useState(null);
   const [savingLabel, setSavingLabel] = useState(false);
@@ -130,10 +140,34 @@ export default function PeoplePage({ showNotif, setPage, setShareParams }) {
       
       const unrecognisedList = await api.faces.unrecognized();
       setUnrecognized(unrecognisedList);
+
+      const sugList = await api.faces.suggestNames();
+      setSuggestions(sugList);
     } catch (err) {
       showNotif("Failed to load people and face data.", "error");
     }
-  }, [showNotif]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showNotif, refreshTrigger]);
+
+  const handleAcceptSuggestion = async (personId, suggestedName) => {
+    try {
+      await api.faces.renamePerson(personId, suggestedName);
+      showNotif(`Successfully labeled cluster as "${suggestedName}"!`, "success");
+      loadData();
+    } catch (err) {
+      showNotif("Failed to accept AI suggestion.", "error");
+    }
+  };
+
+  const handleRenamePerson = async (personId, newName) => {
+    try {
+      await api.faces.renamePerson(personId, newName);
+      showNotif(`Person renamed successfully to "${newName}".`, "success");
+      loadData();
+    } catch (err) {
+      showNotif("Failed to rename person.", "error");
+    }
+  };
 
   useEffect(() => {
     loadData();
@@ -169,6 +203,37 @@ export default function PeoplePage({ showNotif, setPage, setShareParams }) {
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 24 }}>
         <h2 style={{ fontSize: 20, fontWeight: 600, flex: 1, color: GP.textPrimary }}>People & Faces</h2>
       </div>
+
+      {/* AI Smart Suggestions */}
+      {suggestions.length > 0 && (
+        <div style={{ background: GP.white, borderRadius: 16, padding: "20px 24px", boxShadow: GP.shadow1, marginBottom: 24, borderLeft: `4px solid ${GP.blue}` }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: GP.textPrimary, marginBottom: 4 }}>🤖 AI Smart Suggestions</div>
+          <div style={{ fontSize: 12, color: GP.textSecondary, marginBottom: 16 }}>Relationship mapping based on photo co-occurrence. Accept to label them instantly.</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {suggestions.map(s => (
+              <div key={s.person_id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: GP.surface, padding: "12px 16px", borderRadius: 12 }}>
+                <div style={{ flex: 1 }}>
+                  <span style={{ fontWeight: 700, color: GP.textPrimary, fontSize: 13 }}>{s.current_name}</span>
+                  <span style={{ margin: "0 8px", color: GP.textTertiary }}>→</span>
+                  <span style={{ fontWeight: 700, color: GP.blue, fontSize: 13, background: GP.blueLight, padding: "3px 8px", borderRadius: 12 }}>{s.suggested_name}</span>
+                  <span style={{ marginLeft: 12, fontSize: 11, background: "#e6f4ea", color: "#137333", padding: "2px 6px", borderRadius: 8, fontWeight: 600 }}>{Math.round(s.confidence * 100)}% match</span>
+                  <div style={{ fontSize: 12, color: GP.textSecondary, marginTop: 4 }}>{s.reason}</div>
+                </div>
+                <button
+                  onClick={() => handleAcceptSuggestion(s.person_id, s.suggested_name)}
+                  style={{
+                    background: GP.blue, color: "#fff", border: "none", borderRadius: 20,
+                    padding: "6px 16px", fontSize: 12, fontWeight: 600, cursor: "pointer",
+                    boxShadow: GP.shadow1
+                  }}
+                >
+                  Accept
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Unrecognized Face Clusters */}
       <div style={{ background: GP.white, borderRadius: 16, padding: "20px 24px", boxShadow: GP.shadow1, marginBottom: 24 }}>
@@ -294,7 +359,24 @@ export default function PeoplePage({ showNotif, setPage, setShareParams }) {
             )}
             <Avatar person={p} size={64} />
             <div style={{ textAlign: "center" }}>
-              <div style={{ fontWeight: 700, fontSize: 14, color: GP.textPrimary }}>{p.name}</div>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+                <span style={{ fontWeight: 700, fontSize: 14, color: GP.textPrimary }}>{p.name}</span>
+                {p.name !== "Unknown" && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      const newName = window.prompt(`Enter name for this person:`, p.name === "Unnamed Person" ? "" : p.name);
+                      if (newName && newName.trim()) {
+                        handleRenamePerson(p.id, newName.trim());
+                      }
+                    }}
+                    style={{ border: "none", background: "none", cursor: "pointer", fontSize: 12, padding: 0 }}
+                    title="Rename Person"
+                  >
+                    ✏️
+                  </button>
+                )}
+              </div>
               <div style={{ color: GP.textTertiary, fontSize: 12, marginTop: 3 }}>{p.photoCount || p.photo_count || 0} photos</div>
             </div>
             <div style={{ display: "flex", gap: 4, flexWrap: "wrap", justifyContent: "center" }}>
@@ -326,11 +408,17 @@ export default function PeoplePage({ showNotif, setPage, setShareParams }) {
           onClose={() => setViewingCluster(null)}
           onSaveLabel={saveLabel}
           saving={savingLabel}
+          persons={persons}
+          onRefresh={loadData}
         />
       )}
 
       {viewingPerson && (
-        <PersonPhotosModal person={viewingPerson} onClose={() => setViewingPerson(null)} />
+        <PersonPhotosModal 
+          person={viewingPerson} 
+          onClose={() => setViewingPerson(null)} 
+          showNotif={showNotif} 
+        />
       )}
     </div>
   );

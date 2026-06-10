@@ -23,6 +23,19 @@ apiClient.interceptors.request.use(
   }
 );
 
+// Global response interceptor to handle expired tokens
+apiClient.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response && error.response.status === 401) {
+      console.warn("Unauthorized! Clearing token and reloading...");
+      localStorage.removeItem("token");
+      window.location.reload();
+    }
+    return Promise.reject(error);
+  }
+);
+
 export const api = {
   // ── Authentication ──────────────────────────────────────────────────────────
   auth: {
@@ -63,6 +76,17 @@ export const api = {
     isAuthenticated: () => {
       return !!localStorage.getItem("token");
     },
+    googleVerify: async (idToken) => {
+      const response = await apiClient.post("/auth/google/verify", { id_token: idToken });
+      if (response.data.token) {
+        localStorage.setItem("token", response.data.token);
+      }
+      return response.data;
+    },
+    getConfig: async () => {
+      const response = await apiClient.get("/auth/config");
+      return response.data;
+    },
   },
 
   // ── Photos ──────────────────────────────────────────────────────────────────
@@ -85,8 +109,44 @@ export const api = {
       const response = await apiClient.delete(`/photos/${photoId}`);
       return response.data;
     },
+    deleteMultiple: async (photoIds) => {
+      const response = await apiClient.post("/photos/bulk-delete", { photo_ids: photoIds });
+      return response.data;
+    },
     search: async (query) => {
       const response = await apiClient.post("/photos/search", { query });
+      return response.data;
+    },
+    assignLabel: async (photoId, labelName) => {
+      const response = await apiClient.post("/photos/assign-label", { photo_id: photoId, label_name: labelName });
+      return response.data;
+    },
+    getPathsByLabel: async (label) => {
+      const response = await apiClient.get(`/photos/by-label`, { params: { label } });
+      return response.data.paths || [];
+    },
+    shareWhatsAppPywhatkit: async (phone, imagePaths) => {
+      const response = await apiClient.post("/share/whatsapp", { phone, image_paths: imagePaths });
+      return response.data;
+    },
+    shareEmail: async (email, imagePaths) => {
+      const response = await apiClient.post("/share/email", { email, image_paths: imagePaths });
+      return response.data;
+    },
+    toggleFavorite: async (photoId) => {
+      const response = await apiClient.post(`/photos/${photoId}/favorite`);
+      return response.data;
+    },
+    dissociateLabel: async (photoIds, personId) => {
+      const response = await apiClient.post("/photos/dissociate-label", { photo_ids: photoIds, person_id: personId });
+      return response.data;
+    },
+    getSharingHistory: async () => {
+      const response = await apiClient.get("/share/history");
+      return response.data;
+    },
+    moveAlbum: async (photoId, albumName) => {
+      const response = await apiClient.post(`/photos/${photoId}/move-album`, { album_name: albumName });
       return response.data;
     },
   },
@@ -116,6 +176,18 @@ export const api = {
       const response = await apiClient.delete(`/faces/person/${personId}`);
       return response.data;
     },
+    clusteringStatus: async () => {
+      const response = await apiClient.get("/faces/clustering-status");
+      return response.data;
+    },
+    suggestNames: async () => {
+      const response = await apiClient.post("/faces/suggest-names");
+      return response.data;
+    },
+    renamePerson: async (personId, name) => {
+      const response = await apiClient.put(`/faces/person/${personId}`, { name });
+      return response.data;
+    },
   },
 
   // ── Albums ──────────────────────────────────────────────────────────────────
@@ -128,12 +200,20 @@ export const api = {
       const response = await apiClient.post("/albums/create", albumData);
       return response.data;
     },
+    assign: async (albumId, photoIds) => {
+      const response = await apiClient.post(`/albums/${albumId}/assign`, { photo_ids: photoIds });
+      return response.data;
+    },
   },
 
   // ── AI Assistant Chat ───────────────────────────────────────────────────────
   chat: {
     send: async (prompt, history = [], photoIds = []) => {
       const response = await apiClient.post("/chat/", { prompt, history, photo_ids: photoIds });
+      return response.data;
+    },
+    clear: async () => {
+      const response = await apiClient.post("/chat/clear");
       return response.data;
     },
   },

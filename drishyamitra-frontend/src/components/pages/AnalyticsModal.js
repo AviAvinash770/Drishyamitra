@@ -169,32 +169,6 @@ export default function AnalyticsModal({ onClose }) {
               </div>
             </div>
           </div>
-
-          {/* Recent AI Actions */}
-          <div style={{ background: GP.white, borderRadius: 16, padding: "20px 24px", boxShadow: GP.shadow1 }}>
-            <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 16, color: GP.textPrimary }}>🤖 Recent AI Actions</h3>
-            <div style={{ display: "flex", flexDirection: "column" }}>
-              {[
-                { icon: "✓", text: "Auto-tagged 12 photos with Priya", time: "2m ago", color: GP.green, bg: GP.greenLight },
-                { icon: "📁", text: "Sorted 8 photos into 'Festivals'", time: "15m ago", color: GP.blue, bg: GP.blueLight },
-                { icon: "✉", text: "Sent 3 photos to rahul@email.com", time: "1h ago", color: GP.amber, bg: GP.amberLight },
-                { icon: "🔍", text: "Detected 2 new unknown faces", time: "3h ago", color: GP.coral, bg: GP.coralLight },
-                { icon: "✓", text: "Face recognition model updated", time: "Yesterday", color: GP.teal, bg: GP.tealLight },
-              ].map((a, i) => (
-                <div key={i} style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 12,
-                  padding: "10px 0",
-                  borderBottom: i < 4 ? `1px solid ${GP.borderLight}` : "none",
-                }}>
-                  <div style={{ width: 32, height: 32, borderRadius: 8, background: a.bg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, flexShrink: 0, color: a.color }}>{a.icon}</div>
-                  <span style={{ fontSize: 13, color: GP.textPrimary, flex: 1 }}>{a.text}</span>
-                  <span style={{ fontSize: 11, color: GP.textTertiary, whiteSpace: "nowrap" }}>{a.time}</span>
-                </div>
-              ))}
-            </div>
-          </div>
         </div>
       </div>
     </div>

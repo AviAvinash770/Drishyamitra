@@ -1,8 +1,50 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { api } from "../../api";
 import { GP } from "../../styles/theme";
 import ProgressBar from "../common/ProgressBar";
 import Spinner from "../common/Spinner";
+
+const extractChatAction = (text) => {
+  if (!text) return null;
+  
+  // 1. Try markdown json block first
+  const mdMatch = text.match(/```json\s*([\s\S]*?)\s*```/);
+  if (mdMatch) {
+    try {
+      const parsed = JSON.parse(mdMatch[1]);
+      if (parsed && (parsed.action === "EXECUTE_WHATSAPP_SHARE" || parsed.action === "EXECUTE_EMAIL_SHARE")) {
+        return parsed;
+      }
+    } catch (e) {}
+  }
+  
+  // 2. Try raw JSON by finding '{' containing '"action"' and matching brackets
+  const startIndex = text.search(/\{\s*("action"|'action')/);
+  if (startIndex !== -1) {
+    let braceCount = 0;
+    let endIndex = -1;
+    for (let i = startIndex; i < text.length; i++) {
+      if (text[i] === "{") braceCount++;
+      else if (text[i] === "}") {
+        braceCount--;
+        if (braceCount === 0) {
+          endIndex = i;
+          break;
+        }
+      }
+    }
+    if (endIndex !== -1) {
+      const rawJson = text.substring(startIndex, endIndex + 1);
+      try {
+        const parsed = JSON.parse(rawJson);
+        if (parsed && (parsed.action === "EXECUTE_WHATSAPP_SHARE" || parsed.action === "EXECUTE_EMAIL_SHARE")) {
+          return parsed;
+        }
+      } catch (e) {}
+    }
+  }
+  return null;
+};
 
 export default function DeliveryPage({ showNotif, shareParams, setShareParams }) {
   const [to, setTo] = useState("");
@@ -18,12 +60,42 @@ export default function DeliveryPage({ showNotif, shareParams, setShareParams })
   const [persons, setPersons] = useState([]);
   const [albums, setAlbums] = useState([]);
   const [photos, setPhotos] = useState([]);
+  const [resolvedPaths, setResolvedPaths] = useState([]);
   
-  const [localHistory, setLocalHistory] = useState([
-    { id: 1, recipient: "mom@gmail.com", person: "Grandma", count: 12, time: "2 hours ago", platform: "email", status: "delivered" },
-    { id: 2, recipient: "+91 98765 43210", person: "Priya Sharma", count: 8, time: "Yesterday", platform: "whatsapp", status: "delivered" },
-    { id: 3, recipient: "rahul@work.com", person: "Rahul Verma", count: 5, time: "2 days ago", platform: "email", status: "delivered" },
-  ]);
+  const [localHistory, setLocalHistory] = useState([]);
+  const [, setLoadingHistory] = useState(false);
+  const [selectedFailedDelivery, setSelectedFailedDelivery] = useState(null);
+
+  const fetchHistory = useCallback(async () => {
+    setLoadingHistory(true);
+    try {
+      const data = await api.photos.getSharingHistory();
+      setLocalHistory(data || []);
+    } catch (err) {
+      console.error("Failed to fetch sharing history:", err);
+    } finally {
+      setLoadingHistory(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchHistory();
+  }, [fetchHistory]);
+
+  useEffect(() => {
+    const hasPending = localHistory.some(h => h.status === "pending");
+    if (hasPending) {
+      const interval = setInterval(async () => {
+        try {
+          const data = await api.photos.getSharingHistory();
+          setLocalHistory(data || []);
+        } catch (err) {
+          console.error(err);
+        }
+      }, 3000);
+      return () => clearInterval(interval);
+    }
+  }, [localHistory]);
 
   useEffect(() => {
     if (shareParams) {
@@ -41,6 +113,30 @@ export default function DeliveryPage({ showNotif, shareParams, setShareParams })
     api.photos.list().then(list => setPhotos(list)).catch(err => console.error(err));
   }, []);
 
+  useEffect(() => {
+    async function resolvePaths() {
+      let label = "";
+      if (targetType === "person" && selectedPerson) {
+        label = selectedPerson;
+      } else if (targetType === "album" && selectedAlbum) {
+        label = selectedAlbum;
+      }
+
+      if (label) {
+        try {
+          const paths = await api.photos.getPathsByLabel(label);
+          setResolvedPaths(paths);
+        } catch (e) {
+          console.error("Failed to resolve paths:", e);
+          setResolvedPaths([]);
+        }
+      } else {
+        setResolvedPaths([]);
+      }
+    }
+    resolvePaths();
+  }, [targetType, selectedPerson, selectedAlbum]);
+
   function togglePhotoSelection(id) {
     setSelectedPhotoIds(prev =>
       prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
@@ -50,70 +146,56 @@ export default function DeliveryPage({ showNotif, shareParams, setShareParams })
   async function send() {
     if (!to) return;
 
-    let prompt = "";
-    let displayLabel = "";
-    let count = 0;
-
-    if (targetType === "person") {
-      if (!selectedPerson) return;
-      prompt = platform === "whatsapp"
-        ? `whatsapp photos of ${selectedPerson} to ${to}`
-        : `email photos of ${selectedPerson} to ${to}`;
-      displayLabel = selectedPerson;
-      count = persons.find(p => p.name === selectedPerson)?.photoCount || persons.find(p => p.name === selectedPerson)?.photo_count || 5;
-    } else if (targetType === "album") {
-      if (!selectedAlbum) return;
-      prompt = platform === "whatsapp"
-        ? `whatsapp photos in album ${selectedAlbum} to ${to}`
-        : `email photos in album ${selectedAlbum} to ${to}`;
-      displayLabel = `Album: ${selectedAlbum}`;
-      count = albums.find(a => a.name === selectedAlbum)?.count || albums.find(a => a.name === selectedAlbum)?.photo_count || 5;
-    } else if (targetType === "photos") {
-      if (selectedPhotoIds.length === 0) return;
-      prompt = platform === "whatsapp"
-        ? `whatsapp the selected photos to ${to}`
-        : `email the selected photos to ${to}`;
-      displayLabel = `${selectedPhotoIds.length} selected photos`;
-      count = selectedPhotoIds.length;
-    }
-
     setSending(true);
     setProgress(15);
     try {
+      let imagePaths = [];
+
+      if (targetType === "person") {
+        if (!selectedPerson) return;
+        imagePaths = resolvedPaths;
+      } else if (targetType === "album") {
+        if (!selectedAlbum) return;
+        imagePaths = resolvedPaths;
+      } else if (targetType === "photos") {
+        if (selectedPhotoIds.length === 0) return;
+        // Map selected photo IDs to file paths from the loaded photos array
+        imagePaths = selectedPhotoIds.map(id => {
+          const photo = photos.find(p => p.id === id);
+          return photo ? (photo.file_path || photo.filename || "") : "";
+        }).filter(Boolean);
+      }
+
+      if (imagePaths.length === 0) {
+        showNotif("Could not resolve any photos for the selected target. Please try again.", "error");
+        setSending(false);
+        setProgress(0);
+        return;
+      }
+
       setProgress(55);
-      const res = await api.chat.send(prompt, [], targetType === "photos" ? selectedPhotoIds : []);
-      setProgress(90);
 
-      const responseText = res.response || "";
-      const isSuccess = responseText.toLowerCase().includes("successfully shared");
+      // Call the share API directly — no chatbot middleman
+      if (platform === "whatsapp") {
+        await api.photos.shareWhatsAppPywhatkit(to, imagePaths);
+      } else {
+        await api.photos.shareEmail(to, imagePaths);
+      }
 
-      setLocalHistory(prev => [
-        {
-          id: Date.now(),
-          recipient: to,
-          person: displayLabel,
-          count: count,
-          time: "Just now",
-          platform,
-          status: isSuccess ? "delivered" : "failed"
-        },
-        ...prev
-      ]);
       setProgress(100);
       await new Promise(r => setTimeout(r, 200));
 
-      if (isSuccess) {
-        showNotif(`Photos sent successfully via sharing agent!`, "success");
-        setTo("");
-        setSelectedPerson("");
-        setSelectedAlbum("");
-        setSelectedPhotoIds([]);
-      } else {
-        showNotif(responseText || "Failed to share photos via agent.", "error");
-      }
+      const targetLabel = targetType === "person" ? selectedPerson : targetType === "album" ? selectedAlbum : `${selectedPhotoIds.length} photos`;
+      showNotif(`Sharing ${targetLabel} via ${platform === "email" ? "Email" : "WhatsApp"} initiated!`, "success");
+      setTo("");
+      setSelectedPerson("");
+      setSelectedAlbum("");
+      setSelectedPhotoIds([]);
+      fetchHistory();
     } catch (err) {
-      const errMsg = err?.response?.data?.response || err?.message || "Failed to share photos via agent.";
+      const errMsg = err?.response?.data?.error || err?.response?.data?.message || err?.message || "Failed to share photos.";
       showNotif(errMsg, "error");
+      fetchHistory();
     } finally {
       setSending(false);
       setProgress(0);
@@ -359,48 +441,127 @@ export default function DeliveryPage({ showNotif, shareParams, setShareParams })
         <div style={{ background: GP.white, borderRadius: 16, padding: "24px", boxShadow: GP.shadow1 }}>
           <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 20, color: GP.textPrimary }}>Delivery History</h3>
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {localHistory.map(h => (
-              <div key={h.id} style={{
-                padding: "14px 16px",
-                background: GP.surface,
-                borderRadius: 12,
-                display: "flex",
-                gap: 12,
-                alignItems: "center",
-                border: `1px solid ${GP.borderLight}`,
-              }}>
-                <div style={{
-                  width: 40,
-                  height: 40,
-                  borderRadius: 12,
-                  background: h.platform === "email" ? GP.blueLight : GP.greenLight,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  fontSize: 18,
-                  flexShrink: 0
-                }}>
-                  {h.platform === "email" ? "✉" : "💬"}
-                </div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: GP.textPrimary }}>{h.person} — {h.count} photos</div>
-                  <div style={{ fontSize: 11, color: GP.textTertiary, marginTop: 2 }}>{h.recipient} · {h.time}</div>
-                </div>
-                <span style={{
-                  padding: "4px 10px",
-                  borderRadius: 20,
-                  background: h.status === "delivered" ? GP.greenLight : GP.coralLight,
-                  color: h.status === "delivered" ? GP.green : GP.coral,
-                  fontSize: 11,
-                  fontWeight: 600
-                }}>
-                  {h.status === "delivered" ? "✓ Delivered" : "✗ Failed"}
-                </span>
+            {localHistory.length === 0 ? (
+              <div style={{ color: GP.textTertiary, fontSize: 13, padding: "20px 0", fontStyle: "italic", textAlign: "center" }}>
+                No recent activity
               </div>
-            ))}
+            ) : (
+              localHistory.map(h => (
+                <div key={h.id} style={{
+                  padding: "14px 16px",
+                  background: GP.surface,
+                  borderRadius: 12,
+                  display: "flex",
+                  gap: 12,
+                  alignItems: "center",
+                  border: `1px solid ${GP.borderLight}`,
+                }}>
+                  <div style={{
+                    width: 40,
+                    height: 40,
+                    borderRadius: 12,
+                    background: h.platform === "email" ? GP.blueLight : GP.greenLight,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontSize: 18,
+                    flexShrink: 0
+                  }}>
+                    {h.platform === "email" ? "✉" : "💬"}
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: GP.textPrimary }}>{h.person} — {h.count} photos</div>
+                    <div style={{ fontSize: 11, color: GP.textTertiary, marginTop: 2 }}>{h.recipient} · {h.time}</div>
+                  </div>
+                  {h.status === "failed" ? (
+                    <button 
+                      type="button"
+                      onClick={() => setSelectedFailedDelivery(h)}
+                      style={{
+                        padding: "4px 10px",
+                        borderRadius: 20,
+                        background: GP.coralLight,
+                        color: GP.coral,
+                        border: "none",
+                        fontSize: 11,
+                        fontWeight: 600,
+                        cursor: "pointer",
+                        display: "inline-flex",
+                        alignItems: "center",
+                        transition: "all 0.2s"
+                      }}
+                      onMouseEnter={e => {
+                        e.currentTarget.style.background = GP.coral;
+                        e.currentTarget.style.color = "#fff";
+                      }}
+                      onMouseLeave={e => {
+                        e.currentTarget.style.background = GP.coralLight;
+                        e.currentTarget.style.color = GP.coral;
+                      }}
+                      title="Click to view failure details"
+                    >
+                      ✗ Failed
+                    </button>
+                  ) : (
+                    <span 
+                      style={{
+                        padding: "4px 10px",
+                        borderRadius: 20,
+                        background: h.status === "delivered" ? GP.greenLight : GP.blueLight,
+                        color: h.status === "delivered" ? GP.green : GP.blue,
+                        fontSize: 11,
+                        fontWeight: 600,
+                        display: "inline-flex",
+                        alignItems: "center"
+                      }}
+                    >
+                      {h.status === "delivered" ? "✓ Delivered" : "● Pending..."}
+                    </span>
+                  )}
+                </div>
+              ))
+            )}
           </div>
         </div>
       </div>
+
+      {/* Failure details modal */}
+      {selectedFailedDelivery && (
+        <div onClick={() => setSelectedFailedDelivery(null)} style={{
+          position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 1000,
+          display: "flex", alignItems: "center", justifyContent: "center", animation: "fadeIn 0.2s"
+        }}>
+          <div onClick={e => e.stopPropagation()} style={{
+            background: GP.white, borderRadius: 20, width: "90%", maxWidth: 480,
+            padding: 24, boxShadow: GP.shadow3, animation: "scaleIn 0.2s"
+          }}>
+            <h3 style={{ fontSize: 16, fontWeight: 700, color: GP.textPrimary, marginBottom: 12 }}>Delivery Failure Details</h3>
+            
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 20 }}>
+              <div style={{ fontSize: 13 }}><strong style={{ color: GP.textSecondary }}>Platform:</strong> {selectedFailedDelivery.platform === "email" ? "✉ Email" : "💬 WhatsApp"}</div>
+              <div style={{ fontSize: 13 }}><strong style={{ color: GP.textSecondary }}>Recipient:</strong> {selectedFailedDelivery.recipient}</div>
+              <div style={{ fontSize: 13 }}><strong style={{ color: GP.textSecondary }}>Target:</strong> {selectedFailedDelivery.person} ({selectedFailedDelivery.count} photos)</div>
+              <div style={{ fontSize: 13 }}><strong style={{ color: GP.textSecondary }}>Time:</strong> {selectedFailedDelivery.time}</div>
+            </div>
+
+            <div style={{
+              background: "#fdf3f2", borderLeft: `4px solid ${GP.coral}`,
+              borderRadius: 8, padding: 14, marginBottom: 20, fontSize: 13,
+              color: "#c5221f", fontFamily: "monospace", overflowX: "auto"
+            }}>
+              <strong>Error Reason:</strong>
+              <div style={{ marginTop: 6, whiteSpace: "pre-wrap" }}>
+                {selectedFailedDelivery.error_message || "Unknown communication channel error or network timeout."}
+              </div>
+            </div>
+
+            <button onClick={() => setSelectedFailedDelivery(null)} style={{
+              width: "100%", padding: "10px", background: GP.blue, color: "#fff",
+              border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13, cursor: "pointer"
+            }}>Close</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

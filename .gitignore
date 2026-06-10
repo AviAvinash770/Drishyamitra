@@ -21,3 +21,9 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Uploads
+drishyamitra-backend/uploads/
+
+# Databases
+drishyamitra-backend/instance/*.db

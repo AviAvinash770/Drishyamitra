@@ -10,7 +10,7 @@ Endpoints:
 import logging
 from collections import defaultdict
 
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, g
 
 from database.db import db
 from models.photo import Photo
@@ -19,12 +19,14 @@ from models.face import Face
 from models.album import Album
 from models.sharing import DeliveryHistory
 from models.log import AgentLog
+from utils.auth_helpers import token_required
 
 logger = logging.getLogger(__name__)
 bp = Blueprint("analytics", __name__, url_prefix="/api/analytics")
 
 
 @bp.route("/dashboard", methods=["GET"])
+@token_required
 def dashboard():
     """Return comprehensive analytics for the dashboard.
 
@@ -34,44 +36,29 @@ def dashboard():
     """
     try:
         # ── Counts ────────────────────────────────────────────────────
-        total_photos = Photo.query.count()
-        total_people = Person.query.count()
-        total_albums = Album.query.count()
-        total_faces = Face.query.count()
-        unrecognised = Face.query.filter_by(person_id=None).count()
+        total_photos = Photo.query.filter_by(user_id=g.current_user.id).count()
+        total_people = Person.query.filter_by(user_id=g.current_user.id).count()
+        total_albums = Album.query.filter_by(user_id=g.current_user.id).count()
+        total_faces = Face.query.join(Face.photo).filter(Photo.user_id == g.current_user.id).count()
+        unrecognised = Face.query.join(Face.photo).filter(Photo.user_id == g.current_user.id, Face.person_id.is_(None)).count()
         recognised = total_faces - unrecognised
-        total_deliveries = DeliveryHistory.query.count()
-        ai_actions = AgentLog.query.count()
+        total_deliveries = DeliveryHistory.query.filter_by(user_id=g.current_user.id).count()
+        ai_actions = AgentLog.query.filter_by(user_id=g.current_user.id).count()
 
         # ── Face recognition accuracy ─────────────────────────────────
         accuracy = round((recognised / total_faces * 100), 1) if total_faces else 0.0
 
         # ── Storage usage ─────────────────────────────────────────────
-        total_bytes = 0
-        for photo in Photo.query.with_entities(Photo.size).all():
-            size_str = photo.size or "0"
-            try:
-                num = float(size_str.split()[0])
-                unit = size_str.split()[1] if len(size_str.split()) > 1 else "B"
-                if unit == "KB":
-                    total_bytes += num * 1024
-                elif unit == "MB":
-                    total_bytes += num * 1024 * 1024
-                elif unit == "GB":
-                    total_bytes += num * 1024 * 1024 * 1024
-                else:
-                    total_bytes += num
-            except (ValueError, IndexError):
-                pass
-
-        storage_gb = round(total_bytes / (1024 * 1024 * 1024), 2)
+        from utils.storage_helpers import get_user_storage_usage
+        total_bytes = get_user_storage_usage(g.current_user.id)
+        storage_gb = round(total_bytes / (1024 * 1024 * 1024), 4)
         storage_limit_gb = 10.0
-        storage_pct = round((storage_gb / storage_limit_gb) * 100, 1) if storage_limit_gb else 0
+        storage_pct = round((storage_gb / storage_limit_gb) * 100, 2) if storage_limit_gb else 0
 
         # ── Most photographed person ──────────────────────────────────
         most_photographed = None
         if total_people > 0:
-            persons = Person.query.all()
+            persons = Person.query.filter_by(user_id=g.current_user.id).all()
             best = max(persons, key=lambda p: p.photo_count, default=None)
             if best and best.photo_count > 0:
                 most_photographed = {
@@ -82,7 +69,7 @@ def dashboard():
 
         # ── Photos per month ──────────────────────────────────────────
         month_counts = defaultdict(int)
-        for photo in Photo.query.with_entities(Photo.date).all():
+        for photo in Photo.query.filter_by(user_id=g.current_user.id).with_entities(Photo.date).all():
             if photo.date and len(photo.date) >= 7:
                 month_counts[photo.date[:7]] += 1
 
@@ -93,7 +80,7 @@ def dashboard():
 
         # ── People breakdown ──────────────────────────────────────────
         people_stats = []
-        for person in Person.query.order_by(Person.name).all():
+        for person in Person.query.filter_by(user_id=g.current_user.id).order_by(Person.name).all():
             people_stats.append({
                 "name": person.name,
                 "photoCount": person.photo_count,
@@ -102,10 +89,25 @@ def dashboard():
             })
         people_stats.sort(key=lambda x: x["photoCount"], reverse=True)
 
+        total_favorites = Photo.query.filter_by(user_id=g.current_user.id, favorite=True).count()
+
+        from sqlalchemy import func
+        total_group_photos = db.session.query(Face.photo_id).join(Face.photo).filter(
+            Photo.user_id == g.current_user.id
+        ).group_by(Face.photo_id).having(func.count(Face.id) > 1).count()
+
+        total_scenes_albums = Album.query.filter(
+            Album.user_id == g.current_user.id,
+            Album.name.like("Scene:%")
+        ).count()
+
         return jsonify({
             "total_photos": total_photos,
             "total_people": total_people,
             "total_albums": total_albums,
+            "total_favorites": total_favorites,
+            "total_group_photos": total_group_photos,
+            "total_scenes_albums": total_scenes_albums,
             "total_faces_detected": total_faces,
             "unrecognised_faces": unrecognised,
             "recognised_faces": recognised,
@@ -125,4 +127,23 @@ def dashboard():
 
     except Exception as exc:
         logger.exception("Analytics dashboard failed")
+        return jsonify({"error": str(exc)}), 500
+
+
+@bp.route("/activity", methods=["GET"])
+@token_required
+def list_activity_logs():
+    """Fetch and return real activity log records for the logged-in user."""
+    try:
+        from models.activity_log import ActivityLog
+        logs = (
+            ActivityLog.query
+            .filter_by(user_id=g.current_user.id)
+            .order_by(ActivityLog.timestamp.desc())
+            .limit(50)
+            .all()
+        )
+        return jsonify([log.to_dict() for log in logs]), 200
+    except Exception as exc:
+        logger.exception("Failed to fetch activity logs")
         return jsonify({"error": str(exc)}), 500

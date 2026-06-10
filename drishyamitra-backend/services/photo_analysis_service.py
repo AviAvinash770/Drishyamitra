@@ -90,41 +90,50 @@ class PhotoAnalysisService:
 
         # 3. Person matching & Face record creation ----------------------------
         if raw_faces:
-            # Pre-load all known faces (those with an assigned person)
+            # Pre-load all known faces for this user
+            from models.person import Person
             known_faces = (
                 Face.query
-                .filter(Face.person_id.isnot(None))
+                .join(Person, Face.person_id == Person.id)
+                .filter(Person.user_id == photo.user_id)
                 .all()
             )
 
-            for face_data in raw_faces:
+            # First pass: try matching all faces against known people
+            matches = []
+            unmatched_indices = []
+            
+            for idx, face_data in enumerate(raw_faces):
                 faces_detected += 1
+                embedding = face_data['embedding']
+                matched_person = EmbeddingService.find_matching_person(embedding, known_faces)
+                
+                if matched_person:
+                    matches.append((idx, matched_person))
+                    faces_matched += 1
+                    detected_person_names.append(matched_person.name)
+                else:
+                    unmatched_indices.append(idx)
+
+            # Second pass: Save Face records (unmatched faces get person_id = None)
+            for idx, face_data in enumerate(raw_faces):
                 embedding = face_data['embedding']
                 bounding_box = face_data['bounding_box']
                 confidence = face_data['confidence']
-
-                matched_person = EmbeddingService.find_matching_person(
-                    embedding, known_faces
-                )
-
+                
+                matched_p = next((m[1] for m in matches if m[0] == idx), None)
+                
                 new_face = Face(
                     photo_id=photo_id,
-                    person_id=matched_person.id if matched_person else None,
+                    person_id=matched_p.id if matched_p else None,
                     bounding_box=bounding_box,
                     embedding=embedding,
                     confidence=confidence,
                 )
+                if matched_p:
+                    new_face.person = matched_p
                 db.session.add(new_face)
-
-                if matched_person:
-                    faces_matched += 1
-                    detected_person_names.append(matched_person.name)
-                    logger.info(
-                        "Face in photo %s matched to person '%s' (id=%s).",
-                        photo_id,
-                        matched_person.name,
-                        matched_person.id,
-                    )
+                known_faces.append(new_face)
 
             try:
                 db.session.flush()
@@ -136,19 +145,38 @@ class PhotoAnalysisService:
         metadata = PhotoAnalysisService.generate_metadata(
             filename=photo.filename or '',
             detected_names=detected_person_names,
+            image_path=image_path,
         )
 
         description = metadata.get('description', '')
         tags = metadata.get('tags', [])
+        confidence = metadata.get('confidence', 0.0)
+        
+        # Filter tags to fix label explosion
+        if confidence < 0.85:
+            tags = []
+        else:
+            tags = tags[:3]
+
         suggested_album = metadata.get('folder', '')
         emoji = random.choice(_FALLBACK_EMOJIS)
 
         # 5. Update photo record -----------------------------------------------
         try:
+            from services.scene_clustering_service import SceneClusteringService
+            bg_hist = SceneClusteringService.compute_color_histogram(image_path)
+            photo.background_features = bg_hist
             photo.description = description
             photo.tags = tags
             photo.emoji = emoji
             db.session.commit()
+
+            # Run event auto-categorisation
+            try:
+                auto_categorize_event_album(photo, suggested_album)
+            except Exception as ev_err:
+                logger.error("Failed to auto-categorise photo %d: %s", photo_id, ev_err)
+
         except Exception as exc:
             db.session.rollback()
             logger.error("Failed to update photo %s metadata: %s", photo_id, exc)
@@ -158,6 +186,23 @@ class PhotoAnalysisService:
             VectorService.index_photo(photo_id, description, tags)
         except Exception as exc:
             logger.error("Vector indexing failed for photo %s: %s", photo_id, exc)
+
+        # 6.5 Run DBSCAN clustering pipeline automatically -----------------------
+        try:
+            from routes.faces import run_face_clustering
+            app_obj = current_app._get_current_object()
+            run_face_clustering(app_obj, photo.user_id)
+            logger.info("Auto-clustering completed successfully after upload for photo %s", photo_id)
+        except Exception as exc:
+            logger.error("Auto-clustering failed after upload for photo %s: %s", photo_id, exc)
+
+        # 6.6 Run Places & Scenes clustering automatically -----------------------
+        try:
+            from services.scene_clustering_service import SceneClusteringService
+            SceneClusteringService.cluster_photo_by_scene(photo)
+            logger.info("Scene-clustering completed successfully after upload for photo %s", photo_id)
+        except Exception as exc:
+            logger.error("Scene-clustering failed after upload for photo %s: %s", photo_id, exc)
 
         # 7. Return summary ----------------------------------------------------
         result = {
@@ -173,10 +218,10 @@ class PhotoAnalysisService:
         return result
 
     @staticmethod
-    def generate_metadata(filename, detected_names):
+    def generate_metadata(filename, detected_names, image_path=None):
         """
-        Use Groq API (Llama 3.3 70B) to generate photo description, tags,
-        and a suggested album folder.
+        Use OpenAI GPT-4o-mini Vision API to generate photo description, tags,
+        and a suggested album folder based on the image's background/context.
 
         If the API is unavailable or the call fails, a deterministic fallback
         based on the filename is returned instead.
@@ -184,50 +229,72 @@ class PhotoAnalysisService:
         Args:
             filename (str): Original filename of the uploaded photo.
             detected_names (list[str]): Names of people detected in the photo.
+            image_path (str, optional): Path to the image file on disk.
 
         Returns:
             dict: With keys ``description`` (str), ``tags`` (list[str]),
-            ``folder`` (str), and ``confidence`` (float).
+            `folder` (str), and `confidence` (float).
         """
         names_str = ', '.join(detected_names) if detected_names else 'none'
 
-        prompt = (
-            f"You are a photo analyzer. Given a photo file name '{filename}' "
-            f"and detected people '{names_str}', generate:\n"
-            "1. A short natural caption (2 sentences max)\n"
-            "2. 3 to 5 relevant tags\n"
-            "3. Suggest an album from: "
-            "['Family Trips', 'Weddings', 'Festivals', 'Birthdays', 'Events']\n"
-            'Return JSON ONLY: '
-            '{"description": "...", "tags": [...], "folder": "...", '
-            '"confidence": 0.XX}'
-        )
-
         try:
-            from groq import Groq
+            import base64
+            from openai import OpenAI
 
-            api_key = current_app.config.get('GROQ_API_KEY', '')
+            api_key = current_app.config.get('OPENAI_API_KEY', '')
             if not api_key:
-                logger.warning("GROQ_API_KEY is not set – using fallback metadata.")
+                logger.warning("OPENAI_API_KEY is not set – using fallback metadata.")
                 return _fallback_metadata(filename, detected_names)
 
-            model = current_app.config.get('GROQ_MODEL', 'llama-3.3-70b-versatile')
+            if not image_path or not os.path.isfile(image_path):
+                logger.warning("No image path provided or file not found – using fallback metadata.")
+                return _fallback_metadata(filename, detected_names)
 
-            client = Groq(api_key=api_key)
+            # Read image file and encode to base64
+            with open(image_path, "rb") as image_file:
+                base64_image = base64.b64encode(image_file.read()).decode("utf-8")
+
+            # Determine mime type
+            mime_type = "image/jpeg"
+            if image_path.lower().endswith(".png"):
+                mime_type = "image/png"
+            elif image_path.lower().endswith(".gif"):
+                mime_type = "image/gif"
+            elif image_path.lower().endswith(".webp"):
+                mime_type = "image/webp"
+
+            prompt = (
+                f"You are a photo analyzer. Given a photo file name '{filename}' "
+                f"and detected people '{names_str}', analyze the image background and context. "
+                "Describe the context/background (e.g. 'beach', 'birthday party', 'wedding', 'anniversary party', 'park').\n"
+                "Provide:\n"
+                "1. A short natural caption (2 sentences max)\n"
+                "2. 3 to 5 relevant tags\n"
+                "3. Suggest an album from: "
+                "['Family Trips', 'Weddings', 'Festivals', 'Birthdays', 'Anniversaries', 'Events']\n"
+                "Return JSON ONLY (no markdown formatting fences, just raw JSON):\n"
+                '{"description": "...", "tags": [...], "folder": "...", "confidence": 0.XX}'
+            )
+
+            client = OpenAI(api_key=api_key)
             chat_completion = client.chat.completions.create(
-                model=model,
+                model="gpt-4o-mini",
                 messages=[
                     {
-                        'role': 'system',
-                        'content': (
-                            'You are a helpful photo analysis assistant. '
-                            'Always respond with valid JSON only.'
-                        ),
-                    },
-                    {'role': 'user', 'content': prompt},
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{mime_type};base64,{base64_image}"
+                                }
+                            }
+                        ]
+                    }
                 ],
-                temperature=0.4,
-                max_tokens=256,
+                max_tokens=300,
+                temperature=0.4
             )
 
             raw_text = chat_completion.choices[0].message.content.strip()
@@ -244,22 +311,22 @@ class PhotoAnalysisService:
                 'description': str(parsed.get('description', '')),
                 'tags': list(parsed.get('tags', [])),
                 'folder': str(parsed.get('folder', '')),
-                'confidence': float(parsed.get('confidence', 0.5)),
+                'confidence': float(parsed.get('confidence', 0.9)),
             }
 
         except ImportError:
             logger.warning(
-                "groq package not installed – using fallback metadata. "
-                "Install with: pip install groq"
+                "openai package not installed – using fallback metadata. "
+                "Install with: pip install openai"
             )
             return _fallback_metadata(filename, detected_names)
 
         except json.JSONDecodeError as exc:
-            logger.error("Failed to parse Groq response as JSON: %s", exc)
+            logger.error("Failed to parse OpenAI Vision response as JSON: %s", exc)
             return _fallback_metadata(filename, detected_names)
 
         except Exception as exc:
-            logger.error("Groq API call failed: %s", exc)
+            logger.error("OpenAI Vision API call failed: %s", exc)
             return _fallback_metadata(filename, detected_names)
 
 
@@ -303,3 +370,73 @@ def _fallback_metadata(filename, detected_names):
         'folder': 'Events',
         'confidence': 0.3,
     }
+
+
+def auto_categorize_event_album(photo, suggested_album=None):
+    """Automatically categorize photo into event albums: 'Birthdays', 'Weddings', 'Anniversaries'."""
+    text_parts = [
+        photo.description or '',
+        ' '.join(photo.tags or []),
+        photo.filename or '',
+        photo.location or ''
+    ]
+    text = ' '.join(text_parts).lower()
+    
+    event_name = None
+    if suggested_album:
+        folder_clean = suggested_album.lower()
+        if "wedding" in folder_clean or "marriage" in folder_clean or "ceremony" in folder_clean:
+            event_name = "Weddings"
+        elif "birthday" in folder_clean or "party" in folder_clean:
+            event_name = "Birthdays"
+        elif "anniversary" in folder_clean:
+            event_name = "Anniversaries"
+            
+    if not event_name:
+        birthday_kws = ["birthday", "cake", "bday", "candles", "balloons", "celebration", "gift", "wish", "born", "years old", "celebrate"]
+        wedding_kws = ["wedding", "marriage", "bride", "groom", "reception", "ceremony", "couple", "husband", "wife", "garland", "haldi", "mehendi", "sangeet", "marriage anniversary"]
+        anniversary_kws = ["anniversary", "anniversaries", "milestone", "celebrating years", "togetherness", "wedding day", "jubilee"]
+        
+        if any(k in text for k in anniversary_kws):
+            event_name = "Anniversaries"
+        elif any(k in text for k in wedding_kws):
+            event_name = "Weddings"
+        elif any(k in text for k in birthday_kws):
+            event_name = "Birthdays"
+
+    if not event_name and photo.background_features:
+        from models.album import Album
+        from services.scene_clustering_service import SceneClusteringService
+        for target_name in ["Birthdays", "Weddings", "Anniversaries"]:
+            album = Album.query.filter_by(name=target_name, user_id=photo.user_id).first()
+            if album and album.photos:
+                for op in album.photos:
+                    if op.id != photo.id and op.background_features:
+                        sim = SceneClusteringService.calculate_similarity(photo.background_features, op.background_features)
+                        if sim >= 0.75:
+                            event_name = target_name
+                            break
+            if event_name:
+                break
+
+    if event_name:
+        from models.album import Album
+        album = Album.query.filter_by(name=event_name, user_id=photo.user_id).first()
+        if not album:
+            icon_map = {"Birthdays": "🎂", "Weddings": "💍", "Anniversaries": "❤️"}
+            color_map = {"Birthdays": "#00897b", "Weddings": "#e8453c", "Anniversaries": "#e91e63"}
+            bg_map = {"Birthdays": "#e0f2f1", "Weddings": "#fce8e6", "Anniversaries": "#fde8ef"}
+            album = Album(
+                name=event_name,
+                icon=icon_map.get(event_name, "📁"),
+                color=color_map.get(event_name, "#1a73e8"),
+                bg=bg_map.get(event_name, "#e8f0fe"),
+                user_id=photo.user_id
+            )
+            db.session.add(album)
+            db.session.flush()
+        
+        if photo not in album.photos:
+            album.photos.append(photo)
+            db.session.commit()
+            logger.info("Automatically categorized photo %d into event album '%s'", photo.id, event_name)

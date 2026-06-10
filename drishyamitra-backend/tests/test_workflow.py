@@ -16,6 +16,7 @@ from models.photo import Photo
 from models.person import Person
 from models.face import Face
 from models.album import Album
+from models.user import User
 from workflows.agent_workflow import run_agent_workflow
 
 
@@ -23,7 +24,7 @@ class WorkflowTestCase(unittest.TestCase):
     """Test suite for workflows.agent_workflow."""
 
     def setUp(self):
-        """Create a fresh test app and database for every test."""
+        """Create a fresh test app and database for every test, and register a test user."""
         self.app = create_app({
             "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:",
             "TESTING": True,
@@ -35,6 +36,14 @@ class WorkflowTestCase(unittest.TestCase):
         self.app_context.push()
         db.create_all()
 
+        # Register a test user
+        from flask_bcrypt import generate_password_hash
+        hashed = generate_password_hash("StrongP@ss1").decode('utf-8')
+        user = User(username="testuser", email="test@example.com", password_hash=hashed)
+        db.session.add(user)
+        db.session.commit()
+        self.user_id = user.id
+
     def tearDown(self):
         """Drop all tables and pop app context after each test."""
         db.session.remove()
@@ -45,7 +54,7 @@ class WorkflowTestCase(unittest.TestCase):
 
     def test_workflow_general_fallback(self):
         """A general query should route to end and return the offline / fallback reply."""
-        res = run_agent_workflow("Hello, how are you today?")
+        res = run_agent_workflow("Hello, how are you today?", user_id=self.user_id)
         self.assertIn("response", res)
         # Should invoke fallback or general conversation
         self.assertIn("Drishyamitra", res["response"])
@@ -53,18 +62,18 @@ class WorkflowTestCase(unittest.TestCase):
 
     def test_workflow_search_route(self):
         """A query matching search keywords should run the search agent."""
-        res = run_agent_workflow("Find photos taken in 2024")
+        res = run_agent_workflow("Find photos taken in 2024", user_id=self.user_id)
         self.assertTrue(any("Classified intent as 'search'" in a["log"] for a in res["actions"]))
         self.assertTrue(any("[search]" in a["log"] for a in res["actions"]))
 
     def test_workflow_memory_route(self):
         """A query asking 'who' or about relations should trigger the memory agent."""
-        # Seed a person
-        p = Person(name="Alice Smith", initials="AS", color="#ffffff", bg="#000000")
+        # Seed a person scoped to user
+        p = Person(name="Alice Smith", initials="AS", color="#ffffff", bg="#000000", user_id=self.user_id)
         db.session.add(p)
         db.session.commit()
 
-        res = run_agent_workflow("Who is Alice Smith?")
+        res = run_agent_workflow("Who is Alice Smith?", user_id=self.user_id)
         self.assertTrue(any("Classified intent as 'memory'" in a["log"] for a in res["actions"]))
         self.assertTrue(any("[memory] Resolved" in a["log"] for a in res["actions"]))
         self.assertIn("Alice Smith", res["response"])
@@ -74,7 +83,7 @@ class WorkflowTestCase(unittest.TestCase):
     def test_workflow_sharing_requires_search_first(self):
         """If a sharing command is run without selected photo_ids, it should search first."""
         # Seed a person, a photo, and a face linking them
-        person = Person(name="Bob Jones", initials="BJ", color="#ffffff", bg="#000000")
+        person = Person(name="Bob Jones", initials="BJ", color="#ffffff", bg="#000000", user_id=self.user_id)
         db.session.add(person)
         db.session.flush()
 
@@ -83,7 +92,8 @@ class WorkflowTestCase(unittest.TestCase):
             file_path="/uploads/bob_pic.jpg",
             size="1.2 MB",
             height=200,
-            emoji="📸"
+            emoji="📸",
+            user_id=self.user_id
         )
         db.session.add(photo)
         db.session.flush()
@@ -94,7 +104,7 @@ class WorkflowTestCase(unittest.TestCase):
 
         # Ask to share Bob's photos via email.
         # This classifies as 'sharing'. Because photo_ids starts empty, it must route to search first.
-        res = run_agent_workflow("Email photos of Bob Jones to bob@example.com")
+        res = run_agent_workflow("Email photos of Bob Jones to bob@example.com", user_id=self.user_id)
 
         # Verify orchestrator intercepted and set original intent
         self.assertTrue(any("Routing to 'search' first" in a["log"] for a in res["actions"]))
@@ -109,7 +119,7 @@ class WorkflowTestCase(unittest.TestCase):
     def test_workflow_album_requires_search_first(self):
         """Creating an album from a query should find photos first if none are selected."""
         # Seed a person, photo, and face
-        person = Person(name="Charlie", initials="C", color="#ffffff", bg="#000000")
+        person = Person(name="Charlie", initials="C", color="#ffffff", bg="#000000", user_id=self.user_id)
         db.session.add(person)
         db.session.flush()
 
@@ -118,7 +128,8 @@ class WorkflowTestCase(unittest.TestCase):
             file_path="/uploads/charlie.jpg",
             size="800 KB",
             height=180,
-            emoji="📸"
+            emoji="📸",
+            user_id=self.user_id
         )
         db.session.add(photo)
         db.session.flush()
@@ -128,7 +139,7 @@ class WorkflowTestCase(unittest.TestCase):
         db.session.commit()
 
         # Request to organize photos of Charlie into an album named "Charlie Trip"
-        res = run_agent_workflow("Create an album called 'Charlie Trip' with photos of Charlie")
+        res = run_agent_workflow("Create an album called 'Charlie Trip' with photos of Charlie", user_id=self.user_id)
 
         # Verify we went search-first
         self.assertTrue(any("Routing to 'search' first" in a["log"] for a in res["actions"]))

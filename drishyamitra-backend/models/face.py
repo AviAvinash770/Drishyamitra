@@ -22,6 +22,7 @@ class Face(db.Model):
     bounding_box = db.Column(db.JSON, nullable=False)
     embedding = db.Column(db.JSON, nullable=False)  # 512-dim Facenet512 vector
     confidence = db.Column(db.Float, default=1.0)
+    is_manually_labeled = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     def to_dict(self):

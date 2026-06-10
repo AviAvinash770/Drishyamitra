@@ -35,5 +35,19 @@ class Config:
     GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '')
     GROQ_MODEL = 'llama-3.3-70b-versatile'
 
+    # OpenAI API (Vision AI auto-tagging)
+    OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
+
+    # Google Client ID (OAuth 2.0)
+    GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID', '')
+
+    # Mail Server (SMTP)
+    MAIL_SERVER = os.environ.get('MAIL_SERVER', os.environ.get('SMTP_SERVER', ''))
+    MAIL_PORT = int(os.environ.get('MAIL_PORT', os.environ.get('SMTP_PORT', 587)))
+    MAIL_USERNAME = os.environ.get('MAIL_USERNAME', os.environ.get('SMTP_USER', ''))
+    MAIL_PASSWORD = os.environ.get('MAIL_PASSWORD', os.environ.get('SMTP_PASSWORD', ''))
+    MAIL_USE_TLS = os.environ.get('MAIL_USE_TLS', 'True').lower() == 'true'
+    MAIL_DEFAULT_SENDER = os.environ.get('MAIL_DEFAULT_SENDER', os.environ.get('SMTP_USER', 'no-reply@drishyamitra.com'))
+
     # ChromaDB vector store
     CHROMA_PERSIST_DIR = os.environ.get('CHROMA_PERSIST_DIR', './chroma_data')

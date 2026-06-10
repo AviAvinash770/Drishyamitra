@@ -17,6 +17,7 @@ class DeliveryHistory(db.Model):
     person_name = db.Column(db.String(100), nullable=False)
     photo_count = db.Column(db.Integer, default=0)
     status = db.Column(db.String(20), default='pending')
+    error_message = db.Column(db.Text, nullable=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
@@ -25,7 +26,8 @@ class DeliveryHistory(db.Model):
         from datetime import datetime, timezone
 
         now = datetime.now(timezone.utc)
-        delta = now - self.created_at if self.created_at else None
+        created_at_aware = self.created_at.replace(tzinfo=timezone.utc) if self.created_at and self.created_at.tzinfo is None else self.created_at
+        delta = now - created_at_aware if created_at_aware else None
 
         if delta:
             if delta.seconds < 3600:
@@ -44,6 +46,7 @@ class DeliveryHistory(db.Model):
             'person': self.person_name,
             'count': self.photo_count,
             'status': self.status,
+            'error_message': self.error_message,
             'time': time_ago,
             'created_at': self.created_at.isoformat() if self.created_at else None
         }

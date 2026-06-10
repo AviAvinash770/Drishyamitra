@@ -44,13 +44,14 @@ class VisionAgent:
         query: str = state.get("user_query", "").lower()
         action_logs: list = list(state.get("action_logs", []))
         photo_ids: List[int] = list(state.get("photo_ids", []))
+        user_id = state.get("user_id", 0)
 
         try:
             if photo_ids:
-                response = VisionAgent._analyse_photos(photo_ids)
+                response = VisionAgent._analyse_photos(photo_ids, user_id)
             else:
                 # No specific photos – provide library-wide stats
-                response = VisionAgent._global_stats()
+                response = VisionAgent._global_stats(user_id)
 
             action_logs.append(
                 f"[vision] Answered visual query for {len(photo_ids) or 'all'} photos."
@@ -68,7 +69,7 @@ class VisionAgent:
     # ── Private helpers ──────────────────────────────────────────────────────
 
     @staticmethod
-    def _analyse_photos(photo_ids: List[int]) -> str:
+    def _analyse_photos(photo_ids: List[int], user_id: int) -> str:
         """Return a detailed breakdown for the given photo IDs."""
         parts: List[str] = []
         total_faces = 0
@@ -76,7 +77,7 @@ class VisionAgent:
         unidentified = 0
 
         for pid in photo_ids:
-            photo = Photo.query.get(pid)
+            photo = Photo.query.filter_by(id=pid, user_id=user_id).first()
             if not photo:
                 continue
 
@@ -93,7 +94,7 @@ class VisionAgent:
             names: List[str] = []
             for face in faces:
                 if face.person_id:
-                    person = Person.query.get(face.person_id)
+                    person = Person.query.filter_by(id=face.person_id, user_id=user_id).first()
                     name = person.name if person and person.name else "Unknown"
                     names.append(name)
                     identified[name] = identified.get(name, 0) + 1
@@ -106,7 +107,7 @@ class VisionAgent:
             )
 
         # Build summary header
-        header_parts = [f"Analysed **{len(photo_ids)}** photo(s)."]
+        header_parts = [f"Analysed **{len(parts)}** photo(s)."]
         header_parts.append(f"Total faces detected: **{total_faces}**.")
         if identified:
             header_parts.append(
@@ -120,21 +121,25 @@ class VisionAgent:
         return "\n".join(header_parts) + "\n\n" + "\n".join(parts)
 
     @staticmethod
-    def _global_stats() -> str:
+    def _global_stats(user_id: int) -> str:
         """Return library-wide face-recognition statistics."""
-        total_photos = Photo.query.count()
-        total_faces = Face.query.count()
-        total_persons = Person.query.count()
+        total_photos = Photo.query.filter_by(user_id=user_id).count()
+        total_faces = Face.query.join(Face.photo).filter(Photo.user_id == user_id).count()
+        total_persons = Person.query.filter_by(user_id=user_id).count()
 
         # Photos with at least one face
         photos_with_faces = (
             db.session.query(Face.photo_id)
+            .join(Face.photo)
+            .filter(Photo.user_id == user_id)
             .distinct()
             .count()
         )
 
         # Identified vs unidentified faces
-        identified_faces = Face.query.filter(Face.person_id.isnot(None)).count()
+        identified_faces = Face.query.join(Face.photo).filter(
+            Photo.user_id == user_id, Face.person_id.isnot(None)
+        ).count()
         unidentified_faces = total_faces - identified_faces
 
         lines = [

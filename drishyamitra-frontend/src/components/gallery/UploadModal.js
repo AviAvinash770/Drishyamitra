@@ -12,29 +12,7 @@ export default function UploadModal({ onClose, onResult }) {
   const [uploadProgress, setUploadProgress] = useState(null); // { current: 1, total: 3, name: "img.jpg" }
   const fileRef = useRef();
 
-  const themes = [
-    { label: "Family gathering at festival", emoji: "🎉" },
-    { label: "Wedding ceremony outdoors", emoji: "💍" },
-    { label: "Birthday party with cake", emoji: "🎂" },
-    { label: "Vacation beach sunset", emoji: "🌅" },
-    { label: "Corporate event headshots", emoji: "📸" },
-  ];
 
-  async function analyze(desc) {
-    setAnalyzing(true);
-    try {
-      await new Promise(r => setTimeout(r, 1200));
-      setResult({
-        description: `Theme test analysis: ${desc}`,
-        faces: ["Priya Sharma"],
-        folder: "Events",
-        tags: ["auto-tagged", "2025"],
-        confidence: 0.87
-      });
-    } catch {
-      setResult({ description: "Photo processed and indexed.", faces: ["Priya Sharma"], folder: "Events", tags: ["auto-tagged", "2025"], confidence: 0.87 });
-    } finally { setAnalyzing(false); }
-  }
 
   async function handleMultipleUploads(files) {
     setAnalyzing(true);
@@ -158,36 +136,7 @@ export default function UploadModal({ onClose, onResult }) {
                 <div style={{ fontSize: 13, color: GP.textTertiary }}>JPG, PNG, HEIC up to 50MB (multiple allowed)</div>
               </div>
 
-              {!analyzing && (
-                <>
-                  <div style={{ fontSize: 12, color: GP.textTertiary, fontWeight: 500, marginBottom: 10, textTransform: "uppercase", letterSpacing: "0.5px" }}>Test AI Analysis</div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    {themes.map(t => (
-                      <button key={t.label} disabled={analyzing} onClick={() => analyze(t.label)} style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 12,
-                        padding: "12px 16px",
-                        background: GP.surface,
-                        border: `1px solid ${GP.border}`,
-                        borderRadius: 12,
-                        cursor: "pointer",
-                        fontSize: 13,
-                        color: GP.textPrimary,
-                        textAlign: "left",
-                        transition: "all 0.15s",
-                      }}
-                        onMouseEnter={e => e.currentTarget.style.background = GP.blueLight}
-                        onMouseLeave={e => e.currentTarget.style.background = GP.surface}
-                      >
-                        <span style={{ fontSize: 20 }}>{t.emoji}</span>
-                        <span style={{ flex: 1 }}>{t.label}</span>
-                        <span style={{ color: GP.textTertiary }}>→</span>
-                      </button>
-                    ))}
-                  </div>
-                </>
-              )}
+
 
               {analyzing && (
                 <div style={{ textAlign: "center", padding: "24px 0" }}>

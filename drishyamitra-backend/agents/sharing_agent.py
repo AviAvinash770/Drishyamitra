@@ -60,10 +60,11 @@ class SharingAgent:
         query: str = state.get("user_query", "")
         action_logs: list = list(state.get("action_logs", []))
         photo_ids: List[int] = list(state.get("photo_ids", []))
+        user_id = state.get("user_id", 0)
 
         try:
             # ── 1. Resolve photo paths ───────────────────────────────────
-            photo_paths = SharingAgent._resolve_photo_paths(photo_ids)
+            photo_paths = SharingAgent._resolve_photo_paths(photo_ids, user_id)
             if not photo_paths:
                 state["response_text"] = (
                     "There are no photos selected for sharing. "
@@ -85,12 +86,9 @@ class SharingAgent:
                 return state
 
             # ── 3. Person name (for subject / caption) ───────────────────
-            person_name = SharingAgent._extract_person_name(query)
+            person_name = SharingAgent._extract_person_name(query, user_id)
 
-            # ── 4. Infer user_id (default to 0 when not available) ───────
-            user_id = state.get("user_id", 0)
-
-            # ── 5. Send ──────────────────────────────────────────────────
+            # ── 4. Send ──────────────────────────────────────────────────
             if platform == "whatsapp":
                 result = SharingService.send_whatsapp(
                     recipient=recipient,
@@ -108,14 +106,14 @@ class SharingAgent:
                 )
                 method_label = "email"
 
-            # ── 6. Build response ────────────────────────────────────────
-            if result.get("success") or result.get("status") in ["delivered", "sent"]:
+            # ── 5. Build response ────────────────────────────────────────
+            if result.get("success") or result.get("status") in ["pending", "delivered", "sent"]:
                 response = (
                     f"Successfully shared {len(photo_paths)} photo(s) via "
                     f"{method_label} to **{recipient}**."
                 )
             else:
-                error_detail = result.get("error", "Unknown error")
+                error_detail = result.get("error_message") or result.get("error") or "Unknown error"
                 response = (
                     f"I attempted to share the photos via {method_label}, "
                     f"but encountered an issue: {error_detail}"
@@ -142,7 +140,7 @@ class SharingAgent:
     # ── Private helpers ──────────────────────────────────────────────────────
 
     @staticmethod
-    def _resolve_photo_paths(photo_ids: List[int]) -> List[str]:
+    def _resolve_photo_paths(photo_ids: List[int], user_id: int) -> List[str]:
         """Convert a list of photo IDs to file-system paths.
 
         Falls back to ``Photo.filename`` if ``Photo.file_path`` is not
@@ -150,7 +148,7 @@ class SharingAgent:
         """
         paths: List[str] = []
         for pid in photo_ids:
-            photo = Photo.query.get(pid)
+            photo = Photo.query.filter_by(id=pid, user_id=user_id).first()
             if not photo:
                 continue
             path = (
@@ -196,14 +194,14 @@ class SharingAgent:
         return None, "email"
 
     @staticmethod
-    def _extract_person_name(query: str) -> str:
+    def _extract_person_name(query: str, user_id: int) -> str:
         """Try to find a known person name in the query for the subject line.
 
         Returns the first matched person name, or ``'photos'`` as a
         generic fallback.
         """
         try:
-            persons = Person.query.all()
+            persons = Person.query.filter_by(user_id=user_id).all()
             for person in persons:
                 if person.name and person.name.lower() in query.lower():
                     return person.name

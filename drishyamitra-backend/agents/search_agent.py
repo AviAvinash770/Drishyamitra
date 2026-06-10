@@ -71,29 +71,43 @@ class SearchAgent:
             The updated state.
         """
         query: str = state.get("user_query", "")
+        user_id: int = state.get("user_id")
         action_logs: list = list(state.get("action_logs", []))
         structured_ids: List[int] = []
         semantic_ids: List[int] = []
         search_details: List[str] = []
 
         try:
-            # ── 1. Person-name search ────────────────────────────────────
-            person_ids_found = SearchAgent._search_by_person(query)
-            if person_ids_found:
-                structured_ids.extend(person_ids_found)
-                search_details.append(f"person match ({len(person_ids_found)} photos)")
+            # ── Check for "all photos" generic queries ───────────────────
+            q_clean = query.lower().strip()
+            is_all_photos = False
+            if q_clean in ["all", "photos", "pictures", "images", "all photos", "all pictures", "show photos", "show all photos", "show all the photos", "show photos all", "show pictures", "get photos", "list photos", "view photos", "all the photos"]:
+                is_all_photos = True
+            elif any(phrase in q_clean for phrase in ["all photos", "all pictures", "show all", "list all", "view all", "all of my photos"]):
+                is_all_photos = True
 
-            # ── 2. Date / year search ────────────────────────────────────
-            date_ids = SearchAgent._search_by_date(query)
-            if date_ids:
-                structured_ids.extend(date_ids)
-                search_details.append(f"date match ({len(date_ids)} photos)")
+            if is_all_photos:
+                all_photos = Photo.query.filter_by(user_id=user_id).all()
+                structured_ids = [p.id for p in all_photos]
+                search_details.append(f"all photos ({len(all_photos)} photos)")
+            else:
+                # ── 1. Person-name search ────────────────────────────────────
+                person_ids_found = SearchAgent._search_by_person(query, user_id)
+                if person_ids_found:
+                    structured_ids.extend(person_ids_found)
+                    search_details.append(f"person match ({len(person_ids_found)} photos)")
 
-            # ── 3. Album-name search ─────────────────────────────────────
-            album_ids = SearchAgent._search_by_album(query)
-            if album_ids:
-                structured_ids.extend(album_ids)
-                search_details.append(f"album match ({len(album_ids)} photos)")
+                # ── 2. Date / year search ────────────────────────────────────
+                date_ids = SearchAgent._search_by_date(query, user_id)
+                if date_ids:
+                    structured_ids.extend(date_ids)
+                    search_details.append(f"date match ({len(date_ids)} photos)")
+
+                # ── 3. Album-name search ─────────────────────────────────────
+                album_ids = SearchAgent._search_by_album(query, user_id)
+                if album_ids:
+                    structured_ids.extend(album_ids)
+                    search_details.append(f"album match ({len(album_ids)} photos)")
 
             # ── 4. Semantic vector search ────────────────────────────────
             # Only run semantic search if no structured hits were found!
@@ -101,8 +115,14 @@ class SearchAgent:
                 try:
                     sem_results = VectorService.search_photos(query, limit=10)
                     if sem_results:
-                        semantic_ids = [int(pid) for pid in sem_results]
-                        search_details.append(f"semantic match ({len(semantic_ids)} photos)")
+                        # Verify user ownership of the returned photo IDs
+                        for pid in sem_results:
+                            p_id_int = int(pid)
+                            photo = Photo.query.filter_by(id=p_id_int, user_id=user_id).first()
+                            if photo:
+                                semantic_ids.append(p_id_int)
+                        if semantic_ids:
+                            search_details.append(f"semantic match ({len(semantic_ids)} photos)")
                 except Exception as vec_err:
                     logger.warning("VectorService search failed: %s", vec_err)
                     search_details.append("semantic search unavailable")
@@ -144,7 +164,7 @@ class SearchAgent:
     # ── Private helpers ──────────────────────────────────────────────────────
 
     @staticmethod
-    def _search_by_person(query: str) -> List[int]:
+    def _search_by_person(query: str, user_id: int) -> List[int]:
         """Find photo IDs for any person whose name appears in the query.
 
         Uses a case-insensitive ``LIKE`` match against all known person
@@ -153,7 +173,7 @@ class SearchAgent:
         """
         photo_ids: List[int] = []
         try:
-            persons = Person.query.all()
+            persons = Person.query.filter_by(user_id=user_id).all()
             for person in persons:
                 if person.name and person.name.lower() in query.lower():
                     face_rows = Face.query.filter_by(person_id=person.id).all()
@@ -165,7 +185,7 @@ class SearchAgent:
         return photo_ids
 
     @staticmethod
-    def _search_by_date(query: str) -> List[int]:
+    def _search_by_date(query: str, user_id: int) -> List[int]:
         """Extract date / year references from the query and filter photos."""
         photo_ids: List[int] = []
         try:
@@ -182,6 +202,7 @@ class SearchAgent:
 
                 if year and month:
                     photos = Photo.query.filter(
+                        Photo.user_id == user_id,
                         db.extract("year", Photo.created_at) == year,
                         db.extract("month", Photo.created_at) == month,
                     ).all()
@@ -193,6 +214,7 @@ class SearchAgent:
             if year_match:
                 year = int(year_match.group())
                 photos = Photo.query.filter(
+                    Photo.user_id == user_id,
                     db.extract("year", Photo.created_at) == year
                 ).all()
                 photo_ids.extend(p.id for p in photos)
@@ -201,11 +223,11 @@ class SearchAgent:
         return photo_ids
 
     @staticmethod
-    def _search_by_album(query: str) -> List[int]:
+    def _search_by_album(query: str, user_id: int) -> List[int]:
         """Match query text against album names and return member photo IDs."""
         photo_ids: List[int] = []
         try:
-            albums = Album.query.all()
+            albums = Album.query.filter_by(user_id=user_id).all()
             for album in albums:
                 if album.name and album.name.lower() in query.lower():
                     rows = (

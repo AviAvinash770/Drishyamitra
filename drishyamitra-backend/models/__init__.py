@@ -10,3 +10,5 @@ from models.face import Face
 from models.album import Album, photo_album
 from models.sharing import DeliveryHistory
 from models.log import AgentLog
+from models.activity_log import ActivityLog
+

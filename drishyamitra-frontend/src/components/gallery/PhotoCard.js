@@ -1,23 +1,72 @@
 import React, { useState } from "react";
 import { GP } from "../../styles/theme";
+import { api } from "../../api";
 
-export default function PhotoCard({ photo, onClick, style }) {
+export default function PhotoCard({ photo, onClick, style, selected, selectMode, onSelect, onShareClick }) {
   const [fav, setFav] = useState(photo.favorite);
+
+  const handleFavClick = async (e) => {
+    e.stopPropagation();
+    const newFav = !fav;
+    setFav(newFav);
+    try {
+      await api.photos.toggleFavorite(photo.id);
+    } catch (err) {
+      console.error("Failed to toggle favorite on backend:", err);
+      setFav(fav); // Revert state
+    }
+  };
+
+  const handleCardClick = (e) => {
+    if (selectMode) {
+      if (onSelect) onSelect(photo.id);
+    } else {
+      if (onClick) onClick();
+    }
+  };
+
   return (
     <div
       className="photo-card"
-      onClick={onClick}
+      onClick={handleCardClick}
       style={{
         borderRadius: 12,
         overflow: "hidden",
         cursor: "pointer",
         position: "relative",
-        transition: "transform 0.2s, box-shadow 0.2s",
-        boxShadow: GP.shadow1,
+        transition: "transform 0.2s, box-shadow 0.2s, border-color 0.2s",
+        border: selected ? `3px solid ${GP.blue}` : `3px solid transparent`,
+        boxShadow: selected ? GP.shadow3 : GP.shadow1,
+        transform: selected ? "scale(0.98)" : "none",
         background: GP.white,
         ...style,
       }}
     >
+      {/* Checkbox overlay for select mode */}
+      {selectMode && (
+        <div style={{
+          position: "absolute",
+          top: 10,
+          right: 10,
+          width: 24,
+          height: 24,
+          borderRadius: "50%",
+          background: selected ? GP.blue : "rgba(255, 255, 255, 0.8)",
+          border: `2px solid ${selected ? GP.blue : "rgba(0, 0, 0, 0.2)"}`,
+          zIndex: 10,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "#fff",
+          fontSize: 12,
+          fontWeight: "bold",
+          boxShadow: "0 2px 4px rgba(0,0,0,0.15)",
+          transition: "all 0.15s",
+        }}>
+          {selected && "✓"}
+        </div>
+      )}
+
       {/* Photo placeholder */}
       <div style={{
         height: photo.height || 180,
@@ -47,7 +96,7 @@ export default function PhotoCard({ photo, onClick, style }) {
           padding: 10,
           gap: 6,
         }}>
-          <button onClick={e => { e.stopPropagation(); setFav(!fav); }} style={{
+          <button onClick={handleFavClick} style={{
             width: 32,
             height: 32,
             borderRadius: "50%",
@@ -59,7 +108,7 @@ export default function PhotoCard({ photo, onClick, style }) {
             alignItems: "center",
             justifyContent: "center",
           }}>{fav ? "❤️" : "🤍"}</button>
-          <button onClick={e => { e.stopPropagation(); }} style={{
+          <button onClick={e => { e.stopPropagation(); if (onShareClick) onShareClick(); }} style={{
             width: 32,
             height: 32,
             borderRadius: "50%",

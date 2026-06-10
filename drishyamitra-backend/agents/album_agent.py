@@ -59,6 +59,7 @@ class AlbumAgent:
             Updated state.
         """
         query: str = state.get("user_query", "")
+        user_id: int = state.get("user_id")
         action_logs: list = list(state.get("action_logs", []))
         photo_ids: List[int] = list(state.get("photo_ids", []))
 
@@ -73,14 +74,15 @@ class AlbumAgent:
                 state["action_logs"] = action_logs
                 return state
 
-            # Find or create album
+            # Find or create album scoped to user
             album = Album.query.filter(
+                Album.user_id == user_id,
                 db.func.lower(Album.name) == album_name.lower()
             ).first()
 
             created = False
             if not album:
-                album = Album(name=album_name)
+                album = Album(name=album_name, user_id=user_id)
                 db.session.add(album)
                 db.session.flush()  # get album.id
                 created = True
@@ -117,7 +119,7 @@ class AlbumAgent:
     # ── Auto-grouping ────────────────────────────────────────────────────────
 
     @staticmethod
-    def auto_group_photos() -> Dict[str, Any]:
+    def auto_group_photos(user_id=None) -> Dict[str, Any]:
         """Automatically group ungrouped photos into albums.
 
         Grouping strategies (applied in order):
@@ -133,12 +135,15 @@ class AlbumAgent:
         summary: Dict[str, Any] = {"albums_created": 0, "photos_assigned": 0, "details": []}
 
         try:
-            # Identify photos not in any album
+            # Identify photos not in any album (for this user)
             assigned_photo_ids = {
                 row[0]
-                for row in db.session.query(photo_album.c.photo_id).all()
+                for row in db.session.query(photo_album.c.photo_id)
+                .join(Photo, Photo.id == photo_album.c.photo_id)
+                .filter(Photo.user_id == user_id)
+                .all()
             }
-            all_photos = Photo.query.all()
+            all_photos = Photo.query.filter_by(user_id=user_id).all()
             ungrouped = [p for p in all_photos if p.id not in assigned_photo_ids]
 
             if not ungrouped:
@@ -161,10 +166,11 @@ class AlbumAgent:
                     continue
                 album_name = f"Photos – {label}"
                 album = Album.query.filter(
+                    Album.user_id == user_id,
                     db.func.lower(Album.name) == album_name.lower()
                 ).first()
                 if not album:
-                    album = Album(name=album_name)
+                    album = Album(name=album_name, user_id=user_id)
                     db.session.add(album)
                     db.session.flush()
                     summary["albums_created"] += 1
@@ -176,7 +182,7 @@ class AlbumAgent:
             # ── Strategy 2: Group by person ──────────────────────────────
             person_groups: Dict[int, List[int]] = defaultdict(list)
             for photo in ungrouped:
-                faces = Face.query.filter_by(photo_id=photo.id).all()
+                faces = Face.query.join(Face.photo).filter(Face.photo_id == photo.id, Photo.user_id == user_id).all()
                 for face in faces:
                     if face.person_id:
                         person_groups[face.person_id].append(photo.id)
@@ -185,14 +191,17 @@ class AlbumAgent:
                 unique_pids = list(set(pids))
                 if len(unique_pids) < 2:
                     continue
-                person = Person.query.get(person_id)
-                person_name = person.name if person and person.name else f"Person {person_id}"
+                person = Person.query.filter_by(id=person_id, user_id=user_id).first()
+                if not person:
+                    continue
+                person_name = person.name if person.name else f"Person {person_id}"
                 album_name = f"Photos of {person_name}"
                 album = Album.query.filter(
+                    Album.user_id == user_id,
                     db.func.lower(Album.name) == album_name.lower()
                 ).first()
                 if not album:
-                    album = Album(name=album_name)
+                    album = Album(name=album_name, user_id=user_id)
                     db.session.add(album)
                     db.session.flush()
                     summary["albums_created"] += 1
@@ -213,10 +222,11 @@ class AlbumAgent:
                     continue
                 album_name = f"Photos at {loc}"
                 album = Album.query.filter(
+                    Album.user_id == user_id,
                     db.func.lower(Album.name) == album_name.lower()
                 ).first()
                 if not album:
-                    album = Album(name=album_name)
+                    album = Album(name=album_name, user_id=user_id)
                     db.session.add(album)
                     db.session.flush()
                     summary["albums_created"] += 1
@@ -304,8 +314,9 @@ class AlbumAgent:
         for pid in photo_ids:
             if pid in existing:
                 continue
-            # Verify the photo exists
-            if Photo.query.get(pid):
+            # Verify the photo exists and belongs to the user who owns the album
+            photo = Photo.query.filter_by(id=pid, user_id=album.user_id).first()
+            if photo:
                 db.session.execute(
                     photo_album.insert().values(album_id=album.id, photo_id=pid)
                 )

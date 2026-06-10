@@ -25,6 +25,7 @@ class Photo(db.Model):
     height = db.Column(db.Integer, default=180)
     emoji = db.Column(db.String(10), default='📸')
     palette = db.Column(db.JSON, default=list)
+    background_features = db.Column(db.JSON, default=list)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
@@ -52,5 +53,6 @@ class Photo(db.Model):
             'palette': self.palette or ['#e8d5b7', '#d4a574'],
             'persons': [f.person.name for f in self.faces if f.person] if self.faces else [],
             'folder': (self.albums[0].name if self.albums else 'Uncategorized'),
+            'album_names': [a.name for a in self.albums],
             'recognized': any(f.person_id is not None for f in self.faces) if self.faces else False,
         }

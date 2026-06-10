@@ -18,6 +18,7 @@ class Person(db.Model):
     color = db.Column(db.String(20), default='#1a73e8')
     bg = db.Column(db.String(20), default='#e8f0fe')
     tags = db.Column(db.JSON, default=list)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     faces = db.relationship('Face', backref='person', lazy=True)
@@ -33,9 +34,21 @@ class Person(db.Model):
         import os
         photo_url = None
         if self.faces:
-            first_face = self.faces[0]
-            if first_face.photo:
-                photo_url = f"http://localhost:5000/api/photos/file/{os.path.basename(first_face.photo.file_path)}"
+            # Look for a face in a solo photo (photo with only 1 face detected)
+            solo_face = None
+            for f in self.faces:
+                if f.photo and len(f.photo.faces) == 1:
+                    solo_face = f
+                    break
+            
+            if solo_face:
+                # Use cropped face URL of that specific single individual's face
+                photo_url = f"http://localhost:5000/api/faces/crop/{solo_face.id}"
+            else:
+                # Fallback to the full group photo of the first face
+                first_face = self.faces[0]
+                if first_face.photo:
+                    photo_url = f"http://localhost:5000/api/photos/file/{os.path.basename(first_face.photo.file_path)}"
 
         return {
             'id': self.id,
