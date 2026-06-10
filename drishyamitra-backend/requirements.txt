@@ -5,7 +5,6 @@ flask-bcrypt==1.0.1
 psycopg2-binary==2.9.10
 python-dotenv==1.1.0
 PyJWT==2.10.1
-deepface==0.0.93
 opencv-python-headless==4.11.0.86
 Pillow==11.2.1
 chromadb==0.6.3
