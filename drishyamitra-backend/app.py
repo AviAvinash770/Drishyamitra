@@ -311,12 +311,9 @@ def _backfill_legacy_user_ids(db):
 
 
 
-# ---------------------------------------------------------------------------
-# Entrypoint
-# ---------------------------------------------------------------------------
+app = create_app()
 
 if __name__ == "__main__":
-    app = create_app()
     print("\n[INFO] Drishyamitra Backend running on http://localhost:5000")
     print("[INFO] Photo management API ready\n")
     app.run(debug=True, host="0.0.0.0", port=5000)
