@@ -24,8 +24,17 @@ class Config:
     SECRET_KEY = os.environ.get('SECRET_KEY', 'drishyamitra-super-secret-key-change-in-production')
 
     # Database
-    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL', 'sqlite:///drishyamitra.db')
+    db_url = os.environ.get('DATABASE_URL', 'sqlite:///drishyamitra.db')
+    if db_url.startswith('postgres://'):
+        db_url = db_url.replace('postgres://', 'postgresql://', 1)
+    SQLALCHEMY_DATABASE_URI = db_url
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+
+    # Cloudinary
+    CLOUDINARY_URL = os.environ.get('CLOUDINARY_URL', '')
+    CLOUDINARY_CLOUD_NAME = os.environ.get('CLOUDINARY_CLOUD_NAME', '')
+    CLOUDINARY_API_KEY = os.environ.get('CLOUDINARY_API_KEY', '')
+    CLOUDINARY_API_SECRET = os.environ.get('CLOUDINARY_API_SECRET', '')
 
     # File uploads
     UPLOAD_FOLDER = os.environ.get('UPLOAD_FOLDER', 'uploads')

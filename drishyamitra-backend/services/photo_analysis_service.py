@@ -38,7 +38,7 @@ class PhotoAnalysisService:
     """Orchestrates the complete AI analysis pipeline for uploaded photos."""
 
     @staticmethod
-    def analyze_photo(photo_id):
+    def analyze_photo(photo_id, local_path=None):
         """
         Run the full analysis pipeline on an already-persisted ``Photo``.
 
@@ -60,6 +60,7 @@ class PhotoAnalysisService:
 
         Args:
             photo_id (int): Primary-key ID of the ``Photo`` to analyse.
+            local_path (str, optional): Pre-existing local file path to avoid re-download.
 
         Returns:
             dict: Analysis results with keys ``photo_id``, ``faces_detected``,
@@ -72,10 +73,20 @@ class PhotoAnalysisService:
             logger.error("Photo with id=%s not found.", photo_id)
             return {'error': f'Photo {photo_id} not found.'}
 
-        image_path = photo.file_path
+        from utils.storage_helpers import get_local_image_path
+        
+        image_path = None
+        is_temp = False
+        
+        if local_path and os.path.isfile(local_path):
+            image_path = local_path
+            is_temp = False
+        else:
+            image_path, is_temp = get_local_image_path(photo.file_path)
+
         if not image_path or not os.path.isfile(image_path):
-            logger.error("Image file missing for photo %s: %s", photo_id, image_path)
-            return {'error': f'Image file not found at {image_path}'}
+            logger.error("Image file missing for photo %s: %s", photo_id, photo.file_path)
+            return {'error': f'Image file not found at {photo.file_path}'}
 
         faces_detected = 0
         faces_matched = 0
@@ -203,6 +214,15 @@ class PhotoAnalysisService:
             logger.info("Scene-clustering completed successfully after upload for photo %s", photo_id)
         except Exception as exc:
             logger.error("Scene-clustering failed after upload for photo %s: %s", photo_id, exc)
+
+        # 6.7 Clean up local file if it's a Cloudinary URL (to prevent disk bloat)
+        if photo.file_path.startswith(('http://', 'https://')):
+            try:
+                if image_path and os.path.exists(image_path):
+                    os.remove(image_path)
+                    logger.info("Cleaned up local file copy %s for Cloudinary photo %s", image_path, photo_id)
+            except Exception as clean_err:
+                logger.warning("Failed to remove temporary file %s: %s", image_path, clean_err)
 
         # 7. Return summary ----------------------------------------------------
         result = {

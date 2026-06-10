@@ -40,7 +40,7 @@ class Photo(db.Model):
             'name': self.filename,
             'filename': self.filename,
             'file_path': self.file_path,
-            'url': f"http://localhost:5000/api/photos/file/{os.path.basename(self.file_path)}" if self.file_path else None,
+            'url': self.file_path if (self.file_path and self.file_path.startswith(('http://', 'https://'))) else (f"http://localhost:5000/api/photos/file/{os.path.basename(self.file_path)}" if self.file_path else None),
             'size': self.size,
             'date': self.date,
             'upload_date': self.upload_date.isoformat() if self.upload_date else None,

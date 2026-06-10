@@ -259,17 +259,26 @@ def send_email_async_worker(email_recipient, image_paths, delivery_id, app):
             # Attach images securely as MIMEImage (compressing large files dynamically to prevent SMTP disconnects)
             from PIL import Image
             import io
+            from utils.storage_helpers import get_local_image_path
 
-            for path in image_paths:
-                if os.path.exists(path):
+            temp_files = []
+            try:
+                for path in image_paths:
+                    local_path, is_temp = get_local_image_path(path)
+                    if not local_path or not os.path.exists(local_path):
+                        logger.warning("[SMTP] File not found: %s", path)
+                        continue
+                    if is_temp:
+                        temp_files.append(local_path)
+                    
                     try:
                         filename = os.path.basename(path)
-                        file_size = os.path.getsize(path)
+                        file_size = os.path.getsize(local_path)
                         
                         # Compress if file size exceeds 500 KB to keep total email payload light
                         if file_size > 500 * 1024:
                             try:
-                                with Image.open(path) as img:
+                                with Image.open(local_path) as img:
                                     if img.mode in ('RGBA', 'P', 'LA'):
                                         img = img.convert('RGB')
                                     # Limit dimensions to standard HD width/height
@@ -284,18 +293,27 @@ def send_email_async_worker(email_recipient, image_paths, delivery_id, app):
                                     base_name = os.path.splitext(filename)[0]
                                     filename = f"{base_name}_compressed.jpg"
                             except Exception as compress_err:
-                                logger.warning("[SMTP] Failed to compress image %s: %s. Sending original.", path, compress_err)
-                                with open(path, 'rb') as f:
+                                logger.warning("[SMTP] Failed to compress image %s: %s. Sending original.", local_path, compress_err)
+                                with open(local_path, 'rb') as f:
                                     img_data = f.read()
                         else:
-                            with open(path, 'rb') as f:
+                            with open(local_path, 'rb') as f:
                                 img_data = f.read()
 
                         image = MIMEImage(img_data, name=filename)
                         image.add_header('Content-Disposition', 'attachment', filename=filename)
                         msg.attach(image)
                     except Exception as e:
-                        logger.error("[SMTP] Failed to attach file %s: %s", path, e)
+                        logger.error("[SMTP] Failed to attach file %s (local: %s): %s", path, local_path, e)
+            finally:
+                # Cleanup temp downloaded files
+                for tmp in temp_files:
+                    try:
+                        if os.path.exists(tmp):
+                            os.remove(tmp)
+                            logger.info("[SMTP] Cleaned up temporary email attachment file %s", tmp)
+                    except Exception as err:
+                        logger.warning("[SMTP] Failed to delete temp attachment %s: %s", tmp, err)
 
 
             # SSL / TLS execution

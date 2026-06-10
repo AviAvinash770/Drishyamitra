@@ -82,13 +82,46 @@ def upload_photo():
         file_size = os.path.getsize(file_path)
         size_str = _human_size(file_size)
 
+        # Upload to Cloudinary if configured
+        import cloudinary
+        import cloudinary.uploader
+        
+        # Configure Cloudinary
+        cloud_name = current_app.config.get("CLOUDINARY_CLOUD_NAME")
+        api_key = current_app.config.get("CLOUDINARY_API_KEY")
+        api_secret = current_app.config.get("CLOUDINARY_API_SECRET")
+        cloudinary_url = current_app.config.get("CLOUDINARY_URL")
+        
+        db_file_path = file_path
+        
+        if cloudinary_url or (cloud_name and api_key and api_secret):
+            try:
+                if cloudinary_url:
+                    cloudinary.config(cloudinary_url=cloudinary_url)
+                else:
+                    cloudinary.config(
+                        cloud_name=cloud_name,
+                        api_key=api_key,
+                        api_secret=api_secret,
+                        secure=True
+                    )
+                
+                # Upload the local file to Cloudinary
+                upload_res = cloudinary.uploader.upload(file_path, folder="drishyamitra")
+                secure_url = upload_res.get("secure_url")
+                if secure_url:
+                    db_file_path = secure_url
+                    logger.info("Cloudinary upload successful: %s -> %s", file_path, secure_url)
+            except Exception as e:
+                logger.error("Cloudinary upload failed: %s. Falling back to local storage.", e)
+
         # Extract date from filename or use today
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
         # Create photo record
         photo = Photo(
             filename=safe_name,
-            file_path=file_path,
+            file_path=db_file_path,
             size=size_str,
             date=today,
             user_id=g.current_user.id,
@@ -109,12 +142,12 @@ def upload_photo():
             with clustering_status_lock:
                 active_background_tasks[user_id] = active_background_tasks.get(user_id, 0) + 1
             
-            def run_analysis(app, pid, uid):
+            def run_analysis(app, pid, uid, lpath=None):
                 try:
                     with analysis_lock:
                         with app.app_context():
                             try:
-                                PhotoAnalysisService.analyze_photo(pid)
+                                PhotoAnalysisService.analyze_photo(pid, local_path=lpath)
                                 logger.info("Background AI analysis complete for photo %s", pid)
                             except Exception as exc:
                                 logger.warning("Background AI analysis failed for photo %s: %s", pid, exc)
@@ -122,7 +155,7 @@ def upload_photo():
                     with clustering_status_lock:
                         active_background_tasks[uid] = max(0, active_background_tasks.get(uid, 0) - 1)
             
-            t = threading.Thread(target=run_analysis, args=(app_obj, photo.id, user_id))
+            t = threading.Thread(target=run_analysis, args=(app_obj, photo.id, user_id, file_path))
             t.start()
             logger.info("AI analysis started in background for photo %s", photo.id)
         except Exception as exc:
@@ -261,9 +294,21 @@ def delete_photo(photo_id):
         return jsonify({"error": "Photo not found"}), 404
 
     try:
-        # Remove file from disk
-        if os.path.exists(photo.file_path):
-            os.remove(photo.file_path)
+        # Remove file from disk or Cloudinary
+        if photo.file_path and photo.file_path.startswith(('http://', 'https://')):
+            try:
+                import re
+                import cloudinary.uploader
+                m = re.search(r'/upload/(?:v\d+/)?([^.]+)', photo.file_path)
+                if m:
+                    public_id = m.group(1)
+                    cloudinary.uploader.destroy(public_id)
+                    logger.info("Deleted photo from Cloudinary: %s", public_id)
+            except Exception as e:
+                logger.warning("Failed to delete Cloudinary file %s: %s", photo.file_path, e)
+        else:
+            if os.path.exists(photo.file_path):
+                os.remove(photo.file_path)
 
         # Remove from vector store
         try:
@@ -371,12 +416,24 @@ def bulk_delete_photos():
             if not photo:
                 continue
 
-            # Remove file from disk
-            if os.path.exists(photo.file_path):
+            # Remove file from disk or Cloudinary
+            if photo.file_path and photo.file_path.startswith(('http://', 'https://')):
                 try:
-                    os.remove(photo.file_path)
+                    import re
+                    import cloudinary.uploader
+                    m = re.search(r'/upload/(?:v\d+/)?([^.]+)', photo.file_path)
+                    if m:
+                        public_id = m.group(1)
+                        cloudinary.uploader.destroy(public_id)
+                        logger.info("Deleted photo from Cloudinary (bulk): %s", public_id)
                 except Exception as e:
-                    logger.warning("Failed to delete file %s: %s", photo.file_path, e)
+                    logger.warning("Failed to delete Cloudinary file %s (bulk): %s", photo.file_path, e)
+            else:
+                if os.path.exists(photo.file_path):
+                    try:
+                        os.remove(photo.file_path)
+                    except Exception as e:
+                        logger.warning("Failed to delete file %s: %s", photo.file_path, e)
 
             # Remove from vector store
             try:

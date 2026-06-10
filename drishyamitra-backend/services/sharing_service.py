@@ -215,9 +215,12 @@ def _send_real_whatsapp(recipient, person_name, photo_paths):
     paths_to_send = photo_paths[:MAX_PHOTOS]
     media_urls = []
 
-    logger.info("[TWILIO] Uploading %d photo(s) to temporary hosting…", len(paths_to_send))
+    logger.info("[TWILIO] Uploading/resolving %d photo(s) for WhatsApp delivery…", len(paths_to_send))
     for path in paths_to_send:
-        public_url = _upload_for_public_url(path)
+        if path.startswith(('http://', 'https://')):
+            public_url = path
+        else:
+            public_url = _upload_for_public_url(path)
         if not public_url:
             # Fallback: mock an online hosted image URL structure if the actual upload fails.
             # Twilio requires a public URL, passing a local path like C:\ will crash.

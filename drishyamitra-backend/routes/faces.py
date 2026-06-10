@@ -77,8 +77,20 @@ def detect_faces():
     try:
         from services.vision_service import VisionService
         from services.embedding_service import EmbeddingService
+        from utils.storage_helpers import get_local_image_path
+        
+        image_path, is_temp = get_local_image_path(photo.file_path)
+        if not image_path:
+            return jsonify({"error": "Failed to access image file"}), 500
 
-        detections = VisionService.detect_faces(photo.file_path)
+        try:
+            detections = VisionService.detect_faces(image_path)
+        finally:
+            if is_temp and os.path.exists(image_path):
+                try:
+                    os.remove(image_path)
+                except Exception:
+                    pass
 
         # Get all known faces (those already linked to a person) belonging to the user
         known_faces = Face.query.join(Face.photo).filter(Photo.user_id == g.current_user.id, Face.person_id.isnot(None)).all()
@@ -330,14 +342,28 @@ def crop_face(face_id):
     try:
         import cv2
         import io
+        import os
         from flask import send_file
         from services.vision_service import VisionService
+        from utils.storage_helpers import get_local_image_path
 
-        face_region = VisionService.extract_face_region(photo.file_path, face.bounding_box)
-        if face_region is None or face_region.size == 0:
-            return jsonify({"error": "Failed to extract face region"}), 500
+        image_path, is_temp = get_local_image_path(photo.file_path)
+        if not image_path:
+            return jsonify({"error": "Failed to access image file"}), 500
 
-        success, encoded_img = cv2.imencode('.png', face_region)
+        try:
+            face_region = VisionService.extract_face_region(image_path, face.bounding_box)
+            if face_region is None or face_region.size == 0:
+                return jsonify({"error": "Failed to extract face region"}), 500
+
+            success, encoded_img = cv2.imencode('.png', face_region)
+        finally:
+            if is_temp and os.path.exists(image_path):
+                try:
+                    os.remove(image_path)
+                except Exception:
+                    pass
+
         if not success:
             return jsonify({"error": "Failed to encode image"}), 500
 
